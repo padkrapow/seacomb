@@ -301,14 +301,9 @@ impl Arch {
         }
     }
 
-    /// Mask for one argument slot on this architecture.
-    spec fn mask(self) -> u64 {
-        if self == Arch::X86_64 || self == Arch::Aarch64 { u64::MAX } else { 0xFFFF_FFFF }
-    }
-
     /// Whether the architecture has 64-bit argument slots.
     fn is_64bit(self) -> (res: bool)
-        ensures res == (self.mask() == u64::MAX)
+        ensures res == (self == Arch::X86_64 || self == Arch::Aarch64)
     {
         self == Arch::X86_64 || self == Arch::Aarch64
     }
@@ -495,6 +490,34 @@ impl Action {
     }
 }
 
+impl Compare {
+    /// Whether word `x` passes this comparison against `k`, with a `MaskedEq` word already masked.
+    spec fn holds(self, x: u32, k: u32) -> bool {
+        match self {
+            Compare::Eq | Compare::MaskedEq => x == k,
+            Compare::Ne => x != k,
+            Compare::Lt => x < k,
+            Compare::Le => x <= k,
+            Compare::Ge => x >= k,
+            Compare::Gt => x > k,
+        }
+    }
+
+    /// The jump, as [`Builder::emit_jump`] takes it, that leaves a failing one-word test.
+    fn fail_jump(self) -> (res: (JmpOp, bool))
+        ensures forall |x: u32, k: u32| #[trigger] res.0.eval(x, k) == res.1 <==> !self.holds(x, k)
+    {
+        match self {
+            Compare::Eq | Compare::MaskedEq => (JmpOp::Eq, false),
+            Compare::Ne => (JmpOp::Eq, true),
+            Compare::Lt => (JmpOp::Ge, true),
+            Compare::Le => (JmpOp::Gt, true),
+            Compare::Ge => (JmpOp::Ge, false),
+            Compare::Gt => (JmpOp::Gt, false),
+        }
+    }
+}
+
 impl ArgCmp {
     /// The landing point selected by one argument test.
     spec fn word_target(self, arch: Arch, syscall: Syscall, args: Seq<u64>,
@@ -532,22 +555,6 @@ impl ArgCmp {
             Compare::Ge => x >= c,
             Compare::Gt => x > c,
             Compare::MaskedEq => (x % (ty.mask(arch) + 1)) as u64 & self.a == self.b,
-        }
-    }
-
-    /// Evaluates this comparison on an untyped argument bit pattern.
-    spec fn raw_test(self, arch: Arch, value: u64) -> bool {
-        let x = value & arch.mask();
-        let a = self.a & arch.mask();
-        let b = self.b & arch.mask();
-        match self.op {
-            Compare::Ne => x != a,
-            Compare::Lt => x < a,
-            Compare::Le => x <= a,
-            Compare::Eq => x == a,
-            Compare::Ge => x >= a,
-            Compare::Gt => x > a,
-            Compare::MaskedEq => x & a == b & a,
         }
     }
 
@@ -610,7 +617,7 @@ impl ArgCmp {
 
     /// The target when unequal high words reach the equality test.
     spec fn high_neq_target(self, pass: nat, fail: nat) -> nat {
-        if self.op is Lt || self.op is Le { pass } else { fail }
+        if self.op is Ne || self.op is Lt || self.op is Le { pass } else { fail }
     }
 
     /// Typed comparison agrees with the two-word instruction condition.
@@ -692,9 +699,6 @@ impl ArgCmp {
             slot < args.len(),
             width as u64 == sig[self.arg as int].bits(arch),
             width == 16 || width == 32,
-            (width == 16 && !(self.op is MaskedEq))
-                || (width == 32 && sig[self.arg as int].signed()
-                    && (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge)),
         ensures
             self.eval(arch, syscall, args)
                 <==> self.word_test(arch, sig[self.arg as int], args[slot as int]),
@@ -747,6 +751,14 @@ impl ArgCmp {
                     == (((x as u32) & mask) != ((a as u32) & mask)));
             }
             assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
+        } else if self.op is MaskedEq {
+            ty.lemma_cast_bits(arch, x);
+            let m = ty.mask(arch);
+            let b = self.b;
+            assert(((xv & m) & a == b) <==> (((xv as u32) & (a as u32)) == (b as u32)))
+                by (bit_vector)
+                requires a & !m == 0, b & !a == 0, m == 0xFFFF || m == 0xFFFF_FFFF;
+            assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
         } else if ty.signed() {
             ty.lemma_signed_bias(arch, x, self.a);
             ty.lemma_signed_bias(arch, self.a, x);
@@ -777,175 +789,6 @@ impl ArgCmp {
             assert((a & (mask as u64)) == (((a as u32) & mask) as u64)) by (bit_vector);
             assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
         }
-    }
-
-    /// Full-width comparisons and masked narrow comparisons agree with raw tests.
-    proof fn lemma_fast_test(self, arch: Arch, ty: PrimType, raw_arch: Arch, x: u64)
-        requires
-            self.op is MaskedEq || ty.mask(arch) == raw_arch.mask(),
-            self.op is MaskedEq ==> {
-                &&& self.a & !ty.mask(arch) == 0
-                &&& self.b & !self.a == 0
-                &&& ty.mask(arch) & raw_arch.mask() == ty.mask(arch)
-            },
-            ty.signed() ==> self.op is Eq || self.op is Ne || self.op is MaskedEq,
-        ensures self.typed_test(arch, ty, x) <==> self.raw_test(raw_arch, x)
-    {
-        let mask = ty.mask(arch);
-        let raw_mask = raw_arch.mask();
-        let a = self.a;
-        let b = self.b;
-        if self.op is Eq || self.op is Ne {
-            ty.lemma_cast_eq(arch, x, self.a);
-            assert(mask == raw_mask);
-            assert(self.typed_test(arch, ty, x) <==> self.raw_test(raw_arch, x));
-        } else if self.op is MaskedEq {
-            ty.lemma_cast_bits(arch, x);
-            assert(((x & raw_mask) & a) == ((x & mask) & a)) by (bit_vector)
-                requires a & !mask == 0, mask & raw_mask == mask;
-            assert((b & raw_mask) & a == b) by (bit_vector)
-                requires b & !a == 0, a & !mask == 0,
-                    mask & raw_mask == mask;
-            assert(a & raw_mask == a) by (bit_vector)
-                requires a & !mask == 0, mask & raw_mask == mask;
-            assert(((x & raw_mask) & (a & raw_mask)) == ((x & mask) & a));
-            assert(((b & raw_mask) & (a & raw_mask)) == b);
-            assert((ty.cast(arch, x) % (mask + 1)) as u64 == x & mask);
-            assert(self.typed_test(arch, ty, x) <==> self.raw_test(raw_arch, x));
-        } else {
-            assert(!ty.signed());
-            assert(mask == raw_mask);
-            assert(self.typed_test(arch, ty, x) <==> self.raw_test(raw_arch, x));
-        }
-    }
-
-    /// An unchanged raw slot test implements the typed comparison.
-    proof fn lemma_fast_bridge(self, arch: Arch, syscall: Syscall, sig: Seq<PrimType>,
-        args: Seq<u64>, slot: u32, raw_arch: Arch)
-        requires
-            self.wf(arch, syscall),
-            sig =~= syscall.spec_signature(arch),
-            slot as nat == arch.slot_for(sig, self.arg as nat),
-            slot < args.len(),
-            (arch == Arch::X86_64 || arch == Arch::Aarch64)
-                || sig[self.arg as int].bits(arch) != 64,
-            self.op is MaskedEq || sig[self.arg as int].mask(arch) == raw_arch.mask(),
-            self.op is MaskedEq ==>
-                sig[self.arg as int].mask(arch) & raw_arch.mask()
-                    == sig[self.arg as int].mask(arch),
-            sig[self.arg as int].signed() ==>
-                self.op is Eq || self.op is Ne || self.op is MaskedEq,
-        ensures
-            self.eval(arch, syscall, args)
-                <==> (ArgCmp { arg: slot, op: self.op, a: self.a, b: self.b })
-                    .raw_eval(raw_arch, args),
-    {
-        let ty = sig[self.arg as int];
-        let raw = ArgCmp { arg: slot, op: self.op, a: self.a, b: self.b };
-        self.lemma_eval_physical(arch, syscall, args, sig);
-        let x = arch.physical_value(args, sig, self.arg as nat, 0);
-        assert(x == args[slot as int]);
-        self.lemma_fast_test(arch, ty, raw_arch, x);
-        assert(raw.raw_eval(raw_arch, args) == raw.raw_test(raw_arch, x));
-    }
-
-    /// Whether a comparison holds on a raw argument slot.
-    spec fn raw_eval(self, arch: Arch, args: Seq<u64>) -> bool {
-        let x = args[self.arg as int] & arch.mask();
-        let a = self.a & arch.mask();
-        let b = self.b & arch.mask();
-        match self.op {
-            Compare::Ne => x != a,
-            Compare::Lt => x < a,
-            Compare::Le => x <= a,
-            Compare::Eq => x == a,
-            Compare::Ge => x >= a,
-            Compare::Gt => x > a,
-            Compare::MaskedEq => x & a == b & a,
-        }
-    }
-
-    /// A masked equality of 32-bit words is the one the values they widen to make.
-    proof fn lemma_masked_words(x: u32, a: u32, b: u32)
-        ensures ((x as u64) & (a as u64) == (b as u64) & (a as u64)) <==> (x & a == b & a)
-    {
-        assert(((x as u64) & (a as u64) == (b as u64) & (a as u64)) <==> (x & a == b & a))
-            by (bit_vector);
-    }
-
-    /// What this test comes to on the word the filter loads for a 32-bit argument.
-    proof fn lemma_words_32(self, arch: Arch, data: &[u8], xl: u32)
-        requires
-            self.arg < Rule::ARG_COUNT_MAX,
-            Event::parse(data) is Some,
-            arch.mask() == 0xFFFF_FFFF,
-            xl == Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32),
-        ensures
-            self.op is Eq ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl == self.a as u32),
-            self.op is Ne ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl != self.a as u32),
-            self.op is Lt ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl < self.a as u32),
-            self.op is Le ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl <= self.a as u32),
-            self.op is Gt ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl > self.a as u32),
-            self.op is Ge ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl >= self.a as u32),
-            self.op is MaskedEq ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xl & (self.a as u32) == (self.b as u32) & (self.a as u32)),
-    {
-        let x = Event::of(data).args[self.arg as int];
-        Event::lemma_image(data);
-        assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32)
-            == (x & 0xFFFF_FFFF) as u32);
-        ArgCmp::lemma_words(x, self.a);
-        ArgCmp::lemma_words(self.a, x);
-        ArgCmp::lemma_words(self.b, self.a);
-        Self::lemma_masked_words(xl, self.a as u32, self.b as u32);
-    }
-
-    /// What this test comes to on the two words the filter loads for a 64-bit argument.
-    proof fn lemma_words_64(self, arch: Arch, data: &[u8], xl: u32, xh: u32)
-        requires
-            self.arg < Rule::ARG_COUNT_MAX,
-            Event::parse(data) is Some,
-            arch.mask() == u64::MAX,
-            xl == Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32),
-            xh == Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg + 4) as u32),
-        ensures
-            self.op is Eq ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh == (self.a >> 32) as u32 && xl == self.a as u32),
-            self.op is Ne ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> !(xh == (self.a >> 32) as u32 && xl == self.a as u32)),
-            self.op is Lt ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh < (self.a >> 32) as u32
-                    || (xh == (self.a >> 32) as u32 && xl < self.a as u32)),
-            self.op is Le ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh < (self.a >> 32) as u32
-                    || (xh == (self.a >> 32) as u32 && xl <= self.a as u32)),
-            self.op is Gt ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh > (self.a >> 32) as u32
-                    || (xh == (self.a >> 32) as u32 && xl > self.a as u32)),
-            self.op is Ge ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh > (self.a >> 32) as u32
-                    || (xh == (self.a >> 32) as u32 && xl >= self.a as u32)),
-            self.op is MaskedEq ==> (self.raw_eval(arch, Event::of(data).args)
-                <==> xh & (self.a >> 32) as u32
-                        == (self.b >> 32) as u32 & (self.a >> 32) as u32
-                    && xl & (self.a as u32) == (self.b as u32) & (self.a as u32)),
-    {
-        let x = Event::of(data).args[self.arg as int];
-        Event::lemma_image(data);
-        assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32)
-            == (x & 0xFFFF_FFFF) as u32);
-        assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * self.arg + 4) as u32)
-            == (x >> 32) as u32);
-        ArgCmp::lemma_words(x, self.a);
-        ArgCmp::lemma_words(self.a, x);
-        ArgCmp::lemma_words(self.b, self.a);
-        ArgCmp::lemma_words(x & self.a, self.b & self.a);
     }
 
     /// The load at the front of `ext` hands the word it reads to the code behind it.
@@ -985,945 +828,91 @@ impl ArgCmp {
             AluOp::And.eval(a, k)));
     }
 
-    /// A test of the word loaded at the front of `s2` decides where entering `s3` lands.
-    proof fn lemma_chain(s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, data: &[u8],
-        k: u32, xh: u32, to: nat)
+    /// The two-word test lands where its high word, and then its low word, send it.
+    proof fn lemma_branch(self, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
+        s4: Seq<Instr>, s5: Seq<Instr>, s6: Seq<Instr>, lo: u32, bias: u32,
+        k_lo: u32, k_hi: u32, pass: nat, fail: nat)
         requires
-            s2 == s1.push(Instr::LdAbs(k)),
-            k + 4 <= data@.len(),
-            Builder::extends(s2, s3),
-            Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh),
-            Builder::goes_to(s1, data, s1.len(), Builder::word(data, k), to,
-                Builder::word(data, k)),
-        ensures Builder::lands(s3, data, s3.len(), xh, to)
-    {
-        assert(Builder::lands(s1, data, s1.len(), Builder::word(data, k), to));
-        Self::lemma_load(s1, s2, data, k, xh, to);
-        Self::lemma_step(s2, s3, data, xh, s2.len(), xh, to);
-    }
-
-    /// A test of the masked word loaded at the front of `s3` decides where entering
-    /// `s4` lands.
-    proof fn lemma_chain_masked(s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, s4: Seq<Instr>,
-        data: &[u8], k: u32, m1: u32, m2: u32, to: nat)
-        requires
-            s3 == s2.push(Instr::LdAbs(k)),
-            k + 4 <= data@.len(),
-            Builder::extends(s1, s2),
+            lo <= 60,
+            k_lo == if self.op is MaskedEq { self.b as u32 } else { self.a as u32 },
+            k_hi == if self.op is MaskedEq { (self.b >> 32) as u32 }
+                else { ((self.a >> 32) as u32) ^ bias },
+            s2 == if self.op is MaskedEq {
+                s1.push(Instr::Alu(AluOp::And, Src::K(self.a as u32)))
+            } else { s1 },
+            s3 == s2.push(Instr::LdAbs(lo)),
             Builder::extends(s3, s4),
-            Builder::goes_to(s1, data, s1.len(), m1, to, m1),
-            Builder::goes_to(s2, data, s2.len(), Builder::word(data, k), s1.len(), m1),
-            Builder::goes_to(s4, data, s4.len(), m2, s3.len(), m2),
-        ensures Builder::lands(s4, data, s4.len(), m2, to)
-    {
-        assert(Builder::lands(s1, data, s1.len(), m1, to));
-        Self::lemma_step(s1, s2, data, Builder::word(data, k), s1.len(), m1, to);
-        Self::lemma_load(s2, s3, data, k, m2, to);
-        Self::lemma_step(s3, s4, data, m2, s3.len(), m2, to);
-    }
-
-    /// The two-word equality path lands according to its high and low words.
-    proof fn lemma_branch_eq(self, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
-        lo: u32, pass: nat, fail: nat)
-        requires
-            self.op is Eq,
-            lo <= 60,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            forall |data: &[u8], a: u32| a != self.a as u32 ==>
+            Builder::extends(s4, s5),
+            s6 == if self.op is MaskedEq {
+                s5.push(Instr::Alu(AluOp::And, Src::K((self.a >> 32) as u32)))
+            } else { s5 },
+            forall |data: &[u8], a: u32| !self.op.holds(a, k_lo) ==>
                 #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == self.a as u32 ==>
+            forall |data: &[u8], a: u32| self.op.holds(a, k_lo) ==>
                 #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-        ensures
-            forall |data: &[u8], h: u32| Event::parse(data) is Some ==>
-                #[trigger] Builder::lands(s3, data, s3.len(), h,
-                    self.wide_target(Builder::word(data, lo), h, 0, pass, fail)),
-    {
-        assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-            #[trigger] Builder::lands(s3, data, s3.len(), h,
-                self.wide_target(Builder::word(data, lo), h, 0, pass, fail)) by {
-            let low = Builder::word(data, lo);
-            let target = self.wide_target(low, h, 0, pass, fail);
-            let a_hi = (self.a >> 32) as u32;
-            assert((h ^ 0u32) == h) by (bit_vector);
-            assert((a_hi ^ 0u32) == a_hi) by (bit_vector);
-            if h == (self.a >> 32) as u32 {
-                assert(Builder::goes_to(s3, data, s3.len(), h, s2.len(), h));
-                assert(Builder::goes_to(s1, data, s1.len(), low, target, low));
-                Self::lemma_chain(s1, s2, s3, data, lo, h, target);
-            } else {
-                assert(target == fail);
-                assert(Builder::goes_to(s3, data, s3.len(), h, fail, h));
-            }
-        }
-    }
-
-    /// The two-word inequality path lands according to its high and low words.
-    proof fn lemma_branch_ne(self, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
-        lo: u32, pass: nat, fail: nat)
-        requires
-            self.op is Ne,
-            lo <= 60,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            forall |data: &[u8], a: u32| a == self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a != self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-        ensures
-            forall |data: &[u8], h: u32| Event::parse(data) is Some ==>
-                #[trigger] Builder::lands(s3, data, s3.len(), h,
-                    self.wide_target(Builder::word(data, lo), h, 0, pass, fail)),
-    {
-        assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-            #[trigger] Builder::lands(s3, data, s3.len(), h,
-                self.wide_target(Builder::word(data, lo), h, 0, pass, fail)) by {
-            let low = Builder::word(data, lo);
-            let target = self.wide_target(low, h, 0, pass, fail);
-            let a_hi = (self.a >> 32) as u32;
-            assert((h ^ 0u32) == h) by (bit_vector);
-            assert((a_hi ^ 0u32) == a_hi) by (bit_vector);
-            if h == a_hi {
-                assert(Builder::goes_to(s3, data, s3.len(), h, s2.len(), h));
-                assert(Builder::goes_to(s1, data, s1.len(), low, target, low));
-                Self::lemma_chain(s1, s2, s3, data, lo, h, target);
-            } else {
-                assert(target == pass);
-                assert(Builder::goes_to(s3, data, s3.len(), h, pass, h));
-            }
-        }
-    }
-
-    /// A two-word ordering path settles on the high word before the low word.
-    proof fn lemma_branch_order(self, s1: Seq<Instr>, s2: Seq<Instr>,
-        s3: Seq<Instr>, s4: Seq<Instr>, lo: u32, bias: u32,
-        pass: nat, fail: nat)
-        requires
-            self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge,
-            lo <= 60,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], low: u32|
-                #[trigger] Builder::goes_to(s1, data, s1.len(), low,
-                    self.wide_target(low, ((self.a >> 32) as u32) ^ bias,
-                        bias, pass, fail), low),
-            forall |data: &[u8], h: u32| h == (((self.a >> 32) as u32) ^ bias) ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), h, s2.len(), h),
-            forall |data: &[u8], h: u32| h != (((self.a >> 32) as u32) ^ bias) ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), h,
-                    self.high_neq_target(pass, fail), h),
-            forall |data: &[u8], h: u32| h > (((self.a >> 32) as u32) ^ bias) ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), h,
-                    self.high_gt_target(pass, fail), h),
-            forall |data: &[u8], h: u32| h <= (((self.a >> 32) as u32) ^ bias) ==>
+            forall |data: &[u8], h: u32| h == k_hi ==>
                 #[trigger] Builder::goes_to(s4, data, s4.len(), h, s3.len(), h),
+            forall |data: &[u8], h: u32| h != k_hi ==>
+                #[trigger] Builder::goes_to(s4, data, s4.len(), h,
+                    self.high_neq_target(pass, fail), h),
+            (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge) ==> {
+                &&& forall |data: &[u8], h: u32| h > k_hi ==>
+                    #[trigger] Builder::goes_to(s5, data, s5.len(), h,
+                        self.high_gt_target(pass, fail), h)
+                &&& forall |data: &[u8], h: u32| h <= k_hi ==>
+                    #[trigger] Builder::goes_to(s5, data, s5.len(), h, s4.len(), h)
+            },
+            !(self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge) ==> s5 == s4,
         ensures
             forall |data: &[u8], h: u32| Event::parse(data) is Some ==>
-                #[trigger] Builder::lands(s4, data, s4.len(), h,
+                #[trigger] Builder::lands(s6, data, s6.len(), h,
                     self.wide_target(Builder::word(data, lo), h, bias, pass, fail)),
     {
+        let masked = self.op is MaskedEq;
+        let order = self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge;
+        let a_lo = self.a as u32;
+        let a_hi = (self.a >> 32) as u32;
         assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-            #[trigger] Builder::lands(s4, data, s4.len(), h,
+            #[trigger] Builder::lands(s6, data, s6.len(), h,
                 self.wide_target(Builder::word(data, lo), h, bias, pass, fail)) by {
             let low = Builder::word(data, lo);
-            let a_hi = ((self.a >> 32) as u32) ^ bias;
             let target = self.wide_target(low, h, bias, pass, fail);
-            if h == a_hi {
-                assert(Builder::goes_to(s4, data, s4.len(), h, s3.len(), h));
-                assert(Builder::goes_to(s3, data, s3.len(), h, s2.len(), h));
-                assert(Builder::goes_to(s1, data, s1.len(), low, target, low));
-                Self::lemma_chain(s1, s2, s3, data, lo, h, target);
-                Self::lemma_step(s3, s4, data, h, s3.len(), h, target);
-            } else if h > a_hi {
+            let l = if masked { low & a_lo } else { low };
+            let m = if masked { h & a_hi } else { h };
+            if m == k_hi {
+                if self.op.holds(l, k_lo) {
+                    assert(target == pass);
+                    assert(Builder::goes_to(s1, data, s1.len(), l, pass, l));
+                } else {
+                    assert(target == fail);
+                    assert(Builder::goes_to(s1, data, s1.len(), l, fail, l));
+                }
+                assert(Builder::lands(s1, data, s1.len(), l, target));
+                if masked {
+                    Self::lemma_mask(s1, s2, data, a_lo, low);
+                    Self::lemma_step(s1, s2, data, low, s1.len(), l, target);
+                }
+                assert(Builder::lands(s2, data, s2.len(), low, target));
+                Self::lemma_load(s2, s3, data, lo, m, target);
+                assert(Builder::goes_to(s4, data, s4.len(), m, s3.len(), m));
+                Self::lemma_step(s3, s4, data, m, s3.len(), m, target);
+            } else if order && m > k_hi {
                 assert(target == self.high_gt_target(pass, fail));
-                assert(Builder::goes_to(s4, data, s4.len(), h, target, h));
+                assert(Builder::goes_to(s5, data, s5.len(), m, target, m));
             } else {
                 assert(target == self.high_neq_target(pass, fail));
-                assert(Builder::goes_to(s4, data, s4.len(), h, s3.len(), h));
-                assert(Builder::goes_to(s3, data, s3.len(), h, target, h));
-                Self::lemma_step(s3, s4, data, h, s3.len(), h, target);
+                assert(Builder::goes_to(s4, data, s4.len(), m, target, m));
+            }
+            if order && m <= k_hi {
+                assert(Builder::goes_to(s5, data, s5.len(), m, s4.len(), m));
+                Self::lemma_step(s4, s5, data, m, s4.len(), m, target);
+            }
+            assert(Builder::lands(s5, data, s5.len(), m, target));
+            if masked {
+                Self::lemma_mask(s5, s6, data, a_hi, h);
+                Self::lemma_step(s5, s6, data, h, s5.len(), m, target);
             }
         }
-    }
-
-    /// A two-word masked equality path tests both masked words.
-    proof fn lemma_branch_masked(self, s1: Seq<Instr>, s2: Seq<Instr>,
-        s3: Seq<Instr>, s4: Seq<Instr>, s5: Seq<Instr>, lo: u32,
-        pass: nat, fail: nat)
-        requires
-            self.op is MaskedEq,
-            lo <= 60,
-            s2 == s1.push(Instr::Alu(AluOp::And, Src::K(self.a as u32))),
-            s3 == s2.push(Instr::LdAbs(lo)),
-            s5 == s4.push(Instr::Alu(AluOp::And, Src::K((self.a >> 32) as u32))),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32| a != self.b as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == self.b as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.b >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == (self.b >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8], h: u32| Event::parse(data) is Some ==>
-                #[trigger] Builder::lands(s5, data, s5.len(), h,
-                    self.wide_target(Builder::word(data, lo), h, 0, pass, fail)),
-    {
-        assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-            #[trigger] Builder::lands(s5, data, s5.len(), h,
-                self.wide_target(Builder::word(data, lo), h, 0, pass, fail)) by {
-            let low = Builder::word(data, lo);
-            let a_lo = self.a as u32;
-            let a_hi = (self.a >> 32) as u32;
-            let b_lo = self.b as u32;
-            let b_hi = (self.b >> 32) as u32;
-            let masked_low = low & a_lo;
-            let masked_high = h & a_hi;
-            let target = self.wide_target(low, h, 0, pass, fail);
-            assert((h ^ 0u32) == h) by (bit_vector);
-            assert((a_hi ^ 0u32) == a_hi) by (bit_vector);
-            Self::lemma_mask(s4, s5, data, a_hi, h);
-            if masked_high == b_hi {
-                assert(Builder::goes_to(s4, data, s4.len(), masked_high,
-                    s3.len(), masked_high));
-                Self::lemma_mask(s1, s2, data, a_lo, low);
-                assert(Builder::goes_to(s1, data, s1.len(), masked_low, target,
-                    masked_low));
-                Self::lemma_chain_masked(s1, s2, s3, s4, data, lo,
-                    masked_low, masked_high, target);
-                Self::lemma_step(s4, s5, data, h, s4.len(), masked_high, target);
-            } else {
-                assert(target == fail);
-                assert(Builder::goes_to(s4, data, s4.len(), masked_high,
-                    fail, masked_high));
-                assert(Builder::lands(s4, data, s4.len(), masked_high, fail));
-                Self::lemma_step(s4, s5, data, h, s4.len(), masked_high, fail);
-            }
-        }
-    }
-
-    /// The two-word equality test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_eq(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Eq,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            forall |data: &[u8], a: u32| a != self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s3, data, s3.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s3, data, s3.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s3, data, s3.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-            assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-            Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s3, data, s3.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, fail, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, fail));
-            }
-        }
-    }
-
-    /// The two-word inequality test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_ne(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Ne,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            forall |data: &[u8], a: u32| a == self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a != self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s3, data, s3.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s3, data, s3.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s3, data, s3.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, pass, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, pass));
-            }
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s3, data, s3.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-            assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-            Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-        }
-    }
-
-    /// The two-word less-than test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_lt(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, s4: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Lt,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32| a >= self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a < self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-            forall |data: &[u8], a: u32| a > (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a <= (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, pass, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, pass));
-            }
-            Self::lemma_step(s3, s4, data, xh, s3.len(), xh, pass);
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-                assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-                Self::lemma_step(s3, s4, data, xh, s3.len(), xh, fail);
-            } else {
-                assert(Builder::goes_to(s4, data, s4.len(), xh, fail, xh));
-                assert(Builder::lands(s4, data, s4.len(), xh, fail));
-            }
-        }
-    }
-
-    /// The two-word less-or-equal test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_le(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, s4: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Le,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32| a > self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a <= self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-            forall |data: &[u8], a: u32| a > (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a <= (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, pass, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, pass));
-            }
-            Self::lemma_step(s3, s4, data, xh, s3.len(), xh, pass);
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-                assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-                Self::lemma_step(s3, s4, data, xh, s3.len(), xh, fail);
-            } else {
-                assert(Builder::goes_to(s4, data, s4.len(), xh, fail, xh));
-                assert(Builder::lands(s4, data, s4.len(), xh, fail));
-            }
-        }
-    }
-
-    /// The two-word greater-than test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_gt(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, s4: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Gt,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32| a <= self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a > self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-            forall |data: &[u8], a: u32| a > (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a <= (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-                assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-                Self::lemma_step(s3, s4, data, xh, s3.len(), xh, pass);
-            } else {
-                assert(Builder::goes_to(s4, data, s4.len(), xh, pass, xh));
-                assert(Builder::lands(s4, data, s4.len(), xh, pass));
-            }
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, fail, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, fail));
-            }
-            Self::lemma_step(s3, s4, data, xh, s3.len(), xh, fail);
-        }
-    }
-
-    /// The two-word greater-or-equal test lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_ge(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>, s4: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is Ge,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::LdAbs(lo)),
-            Builder::extends(s2, s3),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32| a < self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a >= self.a as u32 ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a != (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, fail, a),
-            forall |data: &[u8], a: u32| a == (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s3, data, s3.len(), a, s2.len(), a),
-            forall |data: &[u8], a: u32| a > (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, pass, a),
-            forall |data: &[u8], a: u32| a <= (self.a >> 32) as u32 ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s4, data, s4.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, pass, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, pass);
-                assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-                Self::lemma_step(s3, s4, data, xh, s3.len(), xh, pass);
-            } else {
-                assert(Builder::goes_to(s4, data, s4.len(), xh, pass, xh));
-                assert(Builder::lands(s4, data, s4.len(), xh, pass));
-            }
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s4, data, s4.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s4, data, s4.len(), xh, s3.len(), xh));
-            if xh == a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl, fail, xl));
-                assert(Builder::goes_to(s3, data, s3.len(), xh, s2.len(), xh));
-                Self::lemma_chain(s1, s2, s3, data, lo, xh, fail);
-            } else {
-                assert(Builder::goes_to(s3, data, s3.len(), xh, fail, xh));
-                assert(Builder::lands(s3, data, s3.len(), xh, fail));
-            }
-            Self::lemma_step(s3, s4, data, xh, s3.len(), xh, fail);
-        }
-    }
-
-    /// The two-word masked equality lands at `pass` when it holds and at `fail`
-    /// when it does not.
-    proof fn lemma_test_maskedeq(self, arch: Arch, s1: Seq<Instr>, s2: Seq<Instr>,
-        s3: Seq<Instr>, s4: Seq<Instr>, s5: Seq<Instr>,
-        lo: u32, hi: u32, pass: nat, fail: nat)
-        requires
-            self.op is MaskedEq,
-            self.arg < Rule::ARG_COUNT_MAX,
-            arch.mask() == u64::MAX,
-            lo == (Policy::OFFSET_EVENT_ARGS + 8 * self.arg) as u32,
-            hi == lo + 4,
-            s2 == s1.push(Instr::Alu(AluOp::And, Src::K(self.a as u32))),
-            s3 == s2.push(Instr::LdAbs(lo)),
-            s5 == s4.push(Instr::Alu(AluOp::And, Src::K((self.a >> 32) as u32))),
-            Builder::extends(s3, s4),
-            forall |data: &[u8], a: u32|
-                a != (self.b as u32) & (self.a as u32) ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32|
-                a == (self.b as u32) & (self.a as u32) ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], a: u32|
-                a != ((self.b >> 32) as u32) & ((self.a >> 32) as u32) ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, fail, a),
-            forall |data: &[u8], a: u32|
-                a == ((self.b >> 32) as u32) & ((self.a >> 32) as u32) ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), a, s3.len(), a),
-        ensures
-            forall |data: &[u8]| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s5, data, s5.len(),
-                    Builder::word(data, hi), pass),
-            forall |data: &[u8]| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(s5, data, s5.len(),
-                    Builder::word(data, hi), fail),
-    {
-        let a_lo = self.a as u32;
-        let a_hi = (self.a >> 32) as u32;
-        let b_lo = self.b as u32;
-        let b_hi = (self.b >> 32) as u32;
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s5, data, s5.len(),
-                Builder::word(data, hi), pass) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            assert(Builder::goes_to(s1, data, s1.len(), xl & a_lo,
-                pass, xl & a_lo));
-            Self::lemma_mask(s1, s2, data, a_lo, xl);
-            assert(Builder::goes_to(s4, data, s4.len(), xh & a_hi,
-                s3.len(), xh & a_hi));
-            Self::lemma_chain_masked(s1, s2, s3, s4, data, lo, xl & a_lo,
-                xh & a_hi, pass);
-            Self::lemma_mask(s4, s5, data, a_hi, xh);
-            Self::lemma_step(s4, s5, data, xh, s4.len(), xh & a_hi, pass);
-        }
-        assert forall |data: &[u8]| Event::parse(data) is Some
-            && !self.raw_eval(arch, Event::of(data).args) implies
-            #[trigger] Builder::lands(s5, data, s5.len(),
-                Builder::word(data, hi), fail) by {
-            let xl = Builder::word(data, lo);
-            let xh = Builder::word(data, hi);
-            self.lemma_words_64(arch, data, xl, xh);
-            Self::lemma_mask(s4, s5, data, a_hi, xh);
-            if xh & a_hi == b_hi & a_hi {
-                assert(Builder::goes_to(s1, data, s1.len(), xl & a_lo,
-                    fail, xl & a_lo));
-                Self::lemma_mask(s1, s2, data, a_lo, xl);
-                assert(Builder::goes_to(s4, data, s4.len(), xh & a_hi,
-                    s3.len(), xh & a_hi));
-                Self::lemma_chain_masked(s1, s2, s3, s4, data, lo, xl & a_lo,
-                    xh & a_hi, fail);
-            } else {
-                assert(Builder::goes_to(s4, data, s4.len(), xh & a_hi,
-                    fail, xh & a_hi));
-                assert(Builder::lands(s4, data, s4.len(), xh & a_hi, fail));
-            }
-            Self::lemma_step(s4, s5, data, xh, s4.len(), xh & a_hi, fail);
-        }
-    }
-
-    /// Emits this test of one argument, jumping to `fail` when it does not hold and
-    /// falling through when it does.
-    ///
-    /// A 64-bit architecture takes two words per argument, and cBPF compares one word
-    /// at a time, so an ordering test there settles on the high word unless the two
-    /// are equal.
-    fn emit_raw(&self, b: &mut Builder, arch: Arch, fail: Label) -> (res: Result<(), CompileError>)
-        requires
-            self.arg < Rule::ARG_COUNT_MAX,
-            0 < fail <= b.rev@.len(),
-            b.wf(),
-        ensures
-            Builder::extends(old(b).rev@, final(b).rev@),
-            final(b).wf(),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
-                    a, old(b).rev@.len()),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) ==>
-                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
-                    a, fail as nat),
-    {
-        let pass = b.label();
-        let lo = Policy::OFFSET_EVENT_ARGS + 8 * self.arg;
-        let hi = lo + 4;
-        let a_lo = self.a as u32;
-        let a_hi = (self.a >> 32) as u32;
-        let b_lo = self.b as u32;
-        let b_hi = (self.b >> 32) as u32;
-
-        if !arch.is_64bit() {
-            match self.op {
-                Compare::Ne => b.emit_jump(JmpOp::Eq, Src::K(a_lo), true, fail)?,
-                Compare::Eq => b.emit_jump(JmpOp::Eq, Src::K(a_lo), false, fail)?,
-                Compare::Lt => b.emit_jump(JmpOp::Ge, Src::K(a_lo), true, fail)?,
-                Compare::Le => b.emit_jump(JmpOp::Gt, Src::K(a_lo), true, fail)?,
-                Compare::Ge => b.emit_jump(JmpOp::Ge, Src::K(a_lo), false, fail)?,
-                Compare::Gt => b.emit_jump(JmpOp::Gt, Src::K(a_lo), false, fail)?,
-                Compare::MaskedEq => {
-                    b.emit_jump(JmpOp::Eq, Src::K(b_lo & a_lo), false, fail)?;
-                    let ghost masked = b.rev@;
-                    b.emit(Instr::Alu(AluOp::And, Src::K(a_lo)));
-                    proof {
-                        let rev = b.rev@;
-                        assert forall |data: &[u8]| Event::parse(data) is Some
-                            && self.raw_eval(arch, Event::of(data).args) implies
-                            #[trigger] Builder::lands(rev, data, rev.len(),
-                                Builder::word(data, lo), pass as nat) by {
-                            let xl = Builder::word(data, lo);
-                            self.lemma_words_32(arch, data, xl);
-                            Self::lemma_mask(masked, rev, data, a_lo, xl);
-                            assert(Builder::goes_to(masked, data, masked.len(), xl & a_lo,
-                                pass as nat, xl & a_lo));
-                            assert(Builder::lands(masked, data, masked.len(), xl & a_lo,
-                                pass as nat));
-                            Self::lemma_step(masked, rev, data, xl, masked.len(), xl & a_lo,
-                                pass as nat);
-                        }
-                        assert forall |data: &[u8]| Event::parse(data) is Some
-                            && !self.raw_eval(arch, Event::of(data).args) implies
-                            #[trigger] Builder::lands(rev, data, rev.len(),
-                                Builder::word(data, lo), fail as nat) by {
-                            let xl = Builder::word(data, lo);
-                            self.lemma_words_32(arch, data, xl);
-                            Self::lemma_mask(masked, rev, data, a_lo, xl);
-                            assert(Builder::goes_to(masked, data, masked.len(), xl & a_lo,
-                                fail as nat, xl & a_lo));
-                            assert(Builder::lands(masked, data, masked.len(), xl & a_lo,
-                                fail as nat));
-                            Self::lemma_step(masked, rev, data, xl, masked.len(), xl & a_lo,
-                                fail as nat);
-                        }
-                    }
-                }
-            }
-            proof {
-                let rev = b.rev@;
-                if !(self.op is MaskedEq) {
-                    assert forall |data: &[u8]| Event::parse(data) is Some
-                        && self.raw_eval(arch, Event::of(data).args) implies
-                        #[trigger] Builder::lands(rev, data, rev.len(),
-                            Builder::word(data, lo), pass as nat) by {
-                        let xl = Builder::word(data, lo);
-                        self.lemma_words_32(arch, data, xl);
-                        assert(Builder::goes_to(rev, data, rev.len(), xl, pass as nat, xl));
-                    }
-                    assert forall |data: &[u8]| Event::parse(data) is Some
-                        && !self.raw_eval(arch, Event::of(data).args) implies
-                        #[trigger] Builder::lands(rev, data, rev.len(),
-                            Builder::word(data, lo), fail as nat) by {
-                        let xl = Builder::word(data, lo);
-                        self.lemma_words_32(arch, data, xl);
-                        assert(Builder::goes_to(rev, data, rev.len(), xl, fail as nat, xl));
-                    }
-                }
-                let ext = rev.push(Instr::LdAbs(lo));
-                assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                    && self.raw_eval(arch, Event::of(data).args) implies
-                    #[trigger] Builder::lands(ext, data, ext.len(), a, pass as nat) by {
-                    Self::lemma_load(rev, ext, data, lo, a, pass as nat);
-                }
-                assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                    && !self.raw_eval(arch, Event::of(data).args) implies
-                    #[trigger] Builder::lands(ext, data, ext.len(), a, fail as nat) by {
-                    Self::lemma_load(rev, ext, data, lo, a, fail as nat);
-                }
-            }
-            b.emit(Instr::LdAbs(lo));
-            return Ok(());
-        }
-
-        match self.op {
-            Compare::Eq => {
-                b.emit_jump(JmpOp::Eq, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                proof {
-                    self.lemma_test_eq(arch, s1, s2, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::Ne => {
-                b.emit_jump(JmpOp::Eq, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                proof {
-                    self.lemma_test_ne(arch, s1, s2, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::Lt => {
-                b.emit_jump(JmpOp::Ge, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, fail)?;
-                proof {
-                    self.lemma_test_lt(arch, s1, s2, s3, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::Le => {
-                b.emit_jump(JmpOp::Gt, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, fail)?;
-                proof {
-                    self.lemma_test_le(arch, s1, s2, s3, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::Gt => {
-                b.emit_jump(JmpOp::Gt, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, pass)?;
-                proof {
-                    self.lemma_test_gt(arch, s1, s2, s3, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::Ge => {
-                b.emit_jump(JmpOp::Ge, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, pass)?;
-                proof {
-                    self.lemma_test_ge(arch, s1, s2, s3, b.rev@, lo, hi, pass as nat, fail as nat);
-                }
-            }
-            Compare::MaskedEq => {
-                b.emit_jump(JmpOp::Eq, Src::K(b_lo & a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::Alu(AluOp::And, Src::K(a_lo)));
-                let ghost s2 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(b_hi & a_hi), false, fail)?;
-                let ghost s4 = b.rev@;
-                b.emit(Instr::Alu(AluOp::And, Src::K(a_hi)));
-                proof {
-                    self.lemma_test_maskedeq(arch, s1, s2, s3, s4, b.rev@, lo, hi,
-                        pass as nat, fail as nat);
-                }
-            }
-        }
-        proof {
-            let rev = b.rev@;
-            let ext = rev.push(Instr::LdAbs(hi));
-            assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.raw_eval(arch, Event::of(data).args) implies
-                #[trigger] Builder::lands(ext, data, ext.len(), a, pass as nat) by {
-                Self::lemma_load(rev, ext, data, hi, a, pass as nat);
-            }
-            assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.raw_eval(arch, Event::of(data).args) implies
-                #[trigger] Builder::lands(ext, data, ext.len(), a, fail as nat) by {
-                Self::lemma_load(rev, ext, data, hi, a, fail as nat);
-            }
-        }
-        b.emit(Instr::LdAbs(hi));
-        Ok(())
     }
 }
 
@@ -2002,61 +991,6 @@ impl ArgCmp {
         let order = self.op == Compare::Lt || self.op == Compare::Le
             || self.op == Compare::Gt || self.op == Compare::Ge;
         let signed_order = ty.exec_signed() && order;
-        if width == 32 && !signed_order || width == 16 && self.op == Compare::MaskedEq {
-            let raw = ArgCmp { arg: slot, op: self.op, a: self.a, b: self.b };
-            proof {
-                let ty0 = sig@[self.arg as int];
-                assert(ty0 == ty);
-                if width == 32 {
-                    assert(ty0.bits(arch) == 32);
-                    assert(((1u64 << 32u64) - 1) == 0xFFFF_FFFF) by (bit_vector);
-                    assert(ty0.mask(arch) == 0xFFFF_FFFF);
-                } else {
-                    assert(ty0.bits(arch) == 16);
-                    assert(((1u64 << 16u64) - 1) == 0xFFFF) by (bit_vector);
-                    assert(ty0.mask(arch) == 0xFFFF);
-                }
-                let mask = ty0.mask(arch);
-                let raw_mask = Arch::X86.mask();
-                assert(mask & raw_mask == mask) by (bit_vector)
-                    requires (mask == 0xFFFF || mask == 0xFFFF_FFFF),
-                        raw_mask == 0xFFFF_FFFF;
-                assert(ty0.signed() ==> self.op is Eq || self.op is Ne
-                    || self.op is MaskedEq);
-                assert forall |data: &[u8]| #[trigger] Event::parse(data) is Some implies
-                    self.eval(arch, syscall, Event::of(data).args)
-                        <==> raw.raw_eval(Arch::X86, Event::of(data).args) by {
-                    Event::lemma_image(data);
-                    self.lemma_fast_bridge(arch, syscall, sig@, Event::of(data).args,
-                        slot, Arch::X86);
-                }
-            }
-            return raw.emit_raw(b, Arch::X86, fail);
-        }
-        if width == 64 && arch.is_64bit() && !signed_order {
-            let raw = ArgCmp { arg: slot, op: self.op, a: self.a, b: self.b };
-            proof {
-                let ty0 = sig@[self.arg as int];
-                assert(ty0 == ty);
-                assert(ty0.bits(arch) == 64);
-                assert(ty0.mask(arch) == u64::MAX);
-                let mask = ty0.mask(arch);
-                let raw_mask = Arch::X86_64.mask();
-                assert(mask & raw_mask == mask) by (bit_vector)
-                    requires mask == u64::MAX, raw_mask == u64::MAX;
-                assert(ty0.signed() ==> self.op is Eq || self.op is Ne
-                    || self.op is MaskedEq);
-                assert forall |data: &[u8]| #[trigger] Event::parse(data) is Some implies
-                    self.eval(arch, syscall, Event::of(data).args)
-                        <==> raw.raw_eval(Arch::X86_64, Event::of(data).args) by {
-                    Event::lemma_image(data);
-                    self.lemma_fast_bridge(arch, syscall, sig@, Event::of(data).args,
-                        slot, Arch::X86_64);
-                }
-            }
-            return raw.emit_raw(b, Arch::X86_64, fail);
-        }
-
         if width <= 32 {
             self.emit_word(b, arch, syscall, sig, slot, width, signed_order, fail)
         } else {
@@ -2064,7 +998,15 @@ impl ArgCmp {
         }
     }
 
-    /// Emits a narrow or signed one-word comparison.
+    /// Emits a comparison of an argument that fits in one word.
+    ///
+    /// ```text
+    ///     ld  [lo]
+    ///     and #0xffff             ; 16-bit, not MaskedEq
+    ///     xor #bias               ; signed ordering
+    ///     and #a                  ; MaskedEq
+    ///     j!<op> #k -> fail
+    /// ```
     #[allow(clippy::too_many_arguments)]
     fn emit_word(&self, b: &mut Builder, _arch: Arch, _syscall: Syscall,
         _sig: &[PrimType], slot: u32, width: u32, signed_order: bool,
@@ -2076,8 +1018,6 @@ impl ArgCmp {
             slot < Rule::ARG_COUNT_MAX,
             width == 16 || width == 32,
             width as u64 == _sig@[self.arg as int].bits(_arch),
-            (width == 16 && !(self.op is MaskedEq))
-                || (width == 32 && signed_order),
             signed_order == (_sig@[self.arg as int].signed() &&
                 (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge)),
             0 < fail <= b.rev@.len(),
@@ -2096,34 +1036,27 @@ impl ArgCmp {
     {
         let ghost pass: nat = b.rev@.len();
         let lo = Policy::OFFSET_EVENT_ARGS + 8 * slot;
+        let masked = self.op == Compare::MaskedEq;
         let mask: u32 = if width == 16 { 0xFFFF } else { u32::MAX };
         let bias: u32 = if signed_order {
             if width == 16 { 0x8000 } else { 0x8000_0000 }
         } else { 0 };
-        let value = (self.a as u32 & mask) ^ bias;
-        match self.op {
-            Compare::Ne => b.emit_jump(JmpOp::Eq, Src::K(value), true, fail)?,
-            Compare::Eq => b.emit_jump(JmpOp::Eq, Src::K(value), false, fail)?,
-            Compare::Lt => b.emit_jump(JmpOp::Ge, Src::K(value), true, fail)?,
-            Compare::Le => b.emit_jump(JmpOp::Gt, Src::K(value), true, fail)?,
-            Compare::Ge => b.emit_jump(JmpOp::Ge, Src::K(value), false, fail)?,
-            Compare::Gt => b.emit_jump(JmpOp::Gt, Src::K(value), false, fail)?,
-            Compare::MaskedEq => b.emit_jump(JmpOp::Eq, Src::K(self.b as u32), false, fail)?,
-        }
+        let k = if masked { self.b as u32 } else { (self.a as u32 & mask) ^ bias };
+        let (jmp, expect) = self.op.fail_jump();
+        b.emit_jump(jmp, Src::K(k), expect, fail)?;
         let ghost r_jump = b.rev@;
-        if self.op == Compare::MaskedEq {
+        if masked {
             b.emit(Instr::Alu(AluOp::And, Src::K(self.a as u32)));
         } else if signed_order {
             b.emit(Instr::Alu(AluOp::Xor, Src::K(bias)));
         }
         let ghost r_xor = b.rev@;
-        if self.op != Compare::MaskedEq && width < 32 {
+        if !masked && width < 32 {
             b.emit(Instr::Alu(AluOp::And, Src::K(mask)));
         }
         let ghost r_and = b.rev@;
         b.emit(Instr::LdAbs(lo));
         proof {
-            assert(!(self.op is MaskedEq));
             assert forall |data: &[u8], incoming: u32| Event::parse(data) is Some implies
                 #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), incoming,
                     self.word_target(_arch, _syscall, Event::of(data).args,
@@ -2136,51 +1069,24 @@ impl ArgCmp {
                 assert(word == (raw & 0xFFFF_FFFF) as u32);
                 assert((raw & 0xFFFF_FFFF) as u32 == raw as u32) by (bit_vector);
                 assert((word & u32::MAX) == word) by (bit_vector);
-                let narrowed = if width == 16 { word & mask } else { word };
-                let tested = if signed_order { narrowed ^ bias } else { narrowed };
-                let want = self.eval(_arch, _syscall, ev.args);
+                let narrowed = if !masked && width == 16 { word & mask } else { word };
+                let tested = if masked { narrowed & (self.a as u32) }
+                    else if signed_order { narrowed ^ bias } else { narrowed };
                 let target = self.word_target(_arch, _syscall, ev.args,
                     pass as nat, fail as nat);
-                assert(narrowed == (raw as u32) & mask);
                 assert((narrowed ^ 0u32) == narrowed) by (bit_vector);
-                assert(tested == narrowed ^ bias);
-                assert(tested == ((raw as u32) & mask) ^ bias);
-                assert(want == self.word_test(_arch, _sig@[self.arg as int], raw));
-                match self.op {
-                    Compare::Eq => {
-                        assert(want == (tested == value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::Ne => {
-                        assert(want == (tested != value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::Lt => {
-                        assert(want == (tested < value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::Le => {
-                        assert(want == (tested <= value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::Ge => {
-                        assert(want == (tested >= value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::Gt => {
-                        assert(want == (tested > value));
-                        assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, target,
-                            tested));
-                    }
-                    Compare::MaskedEq => { assert(false); }
+                assert(self.eval(_arch, _syscall, ev.args) == self.op.holds(tested, k));
+                if self.op.holds(tested, k) {
+                    assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, pass, tested));
+                } else {
+                    assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, fail as nat,
+                        tested));
                 }
                 assert(Builder::lands(r_jump, data, r_jump.len(), tested, target));
-                if signed_order {
+                if masked {
+                    Self::lemma_mask(r_jump, r_xor, data, self.a as u32, word);
+                    Self::lemma_step(r_jump, r_xor, data, word, r_jump.len(), tested, target);
+                } else if signed_order {
                     Builder::lemma_alu(r_xor, AluOp::Xor, bias);
                     assert(Builder::goes_to(r_xor, data, r_xor.len(), narrowed,
                         r_jump.len(), tested));
@@ -2189,7 +1095,7 @@ impl ArgCmp {
                 } else {
                     assert(r_xor == r_jump);
                 }
-                if width == 16 {
+                if !masked && width == 16 {
                     Self::lemma_mask(r_xor, r_and, data, mask, word);
                     Self::lemma_step(r_xor, r_and, data, word, r_xor.len(),
                         narrowed, target);
@@ -2221,6 +1127,17 @@ impl ArgCmp {
     }
 
     /// Emits a two-word comparison for a 64-bit argument.
+    ///
+    /// ```text
+    ///     ld  [hi]
+    ///     xor #0x80000000         ; signed ordering
+    ///     and #a_hi               ; MaskedEq
+    ///     jgt #k_hi -> gt         ; ordering
+    ///     jne #k_hi -> neq
+    ///     ld  [lo]
+    ///     and #a_lo               ; MaskedEq
+    ///     j!<op> #k_lo -> fail
+    /// ```
     #[allow(clippy::too_many_arguments)]
     #[verifier::spinoff_prover]
     fn emit_wide(&self, b: &mut Builder, arch: Arch, _syscall: Syscall,
@@ -2252,106 +1169,41 @@ impl ArgCmp {
         let pass = b.label();
         let lo = Policy::OFFSET_EVENT_ARGS + 8 * slot;
         let hi = if arch.is_64bit() { lo + 4 } else { lo + 8 };
-        let a_lo = self.a as u32;
+        let masked = self.op == Compare::MaskedEq;
+        let order = self.op == Compare::Lt || self.op == Compare::Le
+            || self.op == Compare::Gt || self.op == Compare::Ge;
+        let below = self.op == Compare::Ne || self.op == Compare::Lt || self.op == Compare::Le;
+        let neq = if below { pass } else { fail };
+        let gt = if below { fail } else { pass };
         let bias: u32 = if signed_order { 0x8000_0000 } else { 0 };
-        let a_hi = ((self.a >> 32) as u32) ^ bias;
-        let b_lo = self.b as u32;
-        let b_hi = (self.b >> 32) as u32;
-        match self.op {
-            Compare::Eq => {
-                b.emit_jump(JmpOp::Eq, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                proof {
-                    assert(!signed_order && bias == 0);
-                    let raw_hi = (self.a >> 32) as u32;
-                    assert((raw_hi ^ 0u32) == raw_hi) by (bit_vector);
-                    self.lemma_branch_eq(s1, s2, b.rev@, lo, pass as nat, fail as nat);
-                }
-            }
-            Compare::Ne => {
-                b.emit_jump(JmpOp::Eq, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                proof {
-                    assert(!signed_order && bias == 0);
-                    let raw_hi = (self.a >> 32) as u32;
-                    assert((raw_hi ^ 0u32) == raw_hi) by (bit_vector);
-                    self.lemma_branch_ne(s1, s2, b.rev@, lo, pass as nat, fail as nat);
-                }
-            }
-            Compare::Lt => {
-                b.emit_jump(JmpOp::Ge, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, fail)?;
-                proof { self.lemma_branch_order(s1, s2, s3, b.rev@, lo,
-                    bias, pass as nat, fail as nat); }
-            }
-            Compare::Le => {
-                b.emit_jump(JmpOp::Gt, Src::K(a_lo), true, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, pass)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, fail)?;
-                proof { self.lemma_branch_order(s1, s2, s3, b.rev@, lo,
-                    bias, pass as nat, fail as nat); }
-            }
-            Compare::Gt => {
-                b.emit_jump(JmpOp::Gt, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, pass)?;
-                proof { self.lemma_branch_order(s1, s2, s3, b.rev@, lo,
-                    bias, pass as nat, fail as nat); }
-            }
-            Compare::Ge => {
-                b.emit_jump(JmpOp::Ge, Src::K(a_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s2 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(a_hi), false, fail)?;
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Gt, Src::K(a_hi), true, pass)?;
-                proof { self.lemma_branch_order(s1, s2, s3, b.rev@, lo,
-                    bias, pass as nat, fail as nat); }
-            }
-            Compare::MaskedEq => {
-                b.emit_jump(JmpOp::Eq, Src::K(b_lo), false, fail)?;
-                let ghost s1 = b.rev@;
-                b.emit(Instr::Alu(AluOp::And, Src::K(a_lo)));
-                let ghost s2 = b.rev@;
-                b.emit(Instr::LdAbs(lo));
-                let ghost s3 = b.rev@;
-                b.emit_jump(JmpOp::Eq, Src::K(b_hi), false, fail)?;
-                let ghost s4 = b.rev@;
-                b.emit(Instr::Alu(AluOp::And, Src::K((self.a >> 32) as u32)));
-                proof { self.lemma_branch_masked(s1, s2, s3, s4, b.rev@,
-                    lo, pass as nat, fail as nat); }
-            }
+        let a_lo = self.a as u32;
+        let a_hi = (self.a >> 32) as u32;
+        let k_lo = if masked { self.b as u32 } else { a_lo };
+        let k_hi = if masked { (self.b >> 32) as u32 } else { a_hi ^ bias };
+        let (jmp, expect) = self.op.fail_jump();
+        b.emit_jump(jmp, Src::K(k_lo), expect, fail)?;
+        let ghost s1 = b.rev@;
+        if masked {
+            b.emit(Instr::Alu(AluOp::And, Src::K(a_lo)));
+        }
+        let ghost s2 = b.rev@;
+        b.emit(Instr::LdAbs(lo));
+        let ghost s3 = b.rev@;
+        b.emit_jump(JmpOp::Eq, Src::K(k_hi), false, neq)?;
+        let ghost s4 = b.rev@;
+        if order {
+            b.emit_jump(JmpOp::Gt, Src::K(k_hi), true, gt)?;
+        }
+        let ghost s5 = b.rev@;
+        if masked {
+            b.emit(Instr::Alu(AluOp::And, Src::K(a_hi)));
         }
         let ghost r_branch = b.rev@;
         proof {
-            assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-                #[trigger] Builder::lands(r_branch, data, r_branch.len(), h,
-                    self.wide_target(Builder::word(data, lo), h, bias,
-                        pass as nat, fail as nat)) by {
-                if self.op is Eq || self.op is Ne || self.op is MaskedEq {
-                    assert(!signed_order && bias == 0);
-                }
-            }
+            assert(neq as nat == self.high_neq_target(pass as nat, fail as nat));
+            assert(order ==> gt as nat == self.high_gt_target(pass as nat, fail as nat));
+            self.lemma_branch(s1, s2, s3, s4, s5, r_branch, lo, bias, k_lo, k_hi,
+                pass as nat, fail as nat);
         }
         if signed_order {
             b.emit(Instr::Alu(AluOp::Xor, Src::K(bias)));
