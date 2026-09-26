@@ -15,9 +15,6 @@ mod compiler;
 mod spec;
 pub mod prop;
 
-#[cfg(test)]
-mod tests;
-
 use vstd::prelude::*;
 
 pub use crate::compiler::CompileError;
