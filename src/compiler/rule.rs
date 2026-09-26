@@ -8,76 +8,43 @@ use super::builder::{Builder, Label};
 verus! {
 
 impl Arch {
-    /// The slot after consuming one virtual argument.
+    /// Whether an argument of type `ty` takes two slots.
+    spec fn splits(self, ty: PrimType) -> bool {
+        (self == Arch::X86 || self == Arch::Arm) && ty.bits(self) == 64
+    }
+
+    /// The slot after an argument of type `ty` read from `slot` on.
     spec fn next_slot(self, slot: nat, ty: PrimType) -> nat {
-        if (self == Arch::X86 || self == Arch::Arm) && ty.bits(self) == 64 {
+        if self.splits(ty) {
             (if self == Arch::Arm { slot + slot % 2 } else { slot }) + 2
         } else {
             slot + 1
         }
     }
 
-    /// The first free physical slot after `n` virtual arguments from `slot`.
-    spec fn slot_from(self, sig: Seq<PrimType>, n: nat, slot: nat) -> nat
-        decreases n
-    {
-        if n == 0 { slot }
-        else { self.slot_from(sig.drop_first(), (n - 1) as nat,
-            self.next_slot(slot, sig[0])) }
+    /// The arguments of a syscall with signature `sig`, read from `slot` on.
+    spec fn interp_from(self, args: Seq<u64>, sig: Seq<PrimType>, slot: nat) -> Seq<int> {
+        match self {
+            Arch::X86 => Self::interp_args_x86(args.skip(slot as int), sig),
+            Arch::Arm => Self::interp_args_arm(args, sig, slot as int),
+            _ => Seq::new(sig.len(), |i: int| sig[i].cast(self, args[slot + i])),
+        }
     }
 
-    /// The first free physical slot after `n` virtual arguments.
-    spec fn slot_before(self, sig: Seq<PrimType>, n: nat) -> nat {
-        self.slot_from(sig, n, 0)
-    }
-
-    /// Consuming argument `n` advances the first free physical slot.
-    proof fn lemma_slot_next(self, sig: Seq<PrimType>, n: nat, slot: nat)
-        requires n < sig.len()
-        ensures self.slot_from(sig, n + 1, slot)
-            == self.next_slot(self.slot_from(sig, n, slot), sig[n as int])
-        decreases n
-    {
-        reveal_with_fuel(Arch::slot_from, 2);
-        if n > 0 {
-            let tail = sig.drop_first();
-            let next = self.next_slot(slot, sig[0]);
-            self.lemma_slot_next(tail, (n - 1) as nat, next);
-            assert(tail[(n - 1) as int] == sig[n as int]);
-            assert(self.slot_from(sig, n + 1, slot)
-                == self.slot_from(tail, n, next));
-            assert(self.slot_from(sig, n, slot)
-                == self.slot_from(tail, (n - 1) as nat, next));
-            assert(self.slot_from(tail, n, next)
-                == self.next_slot(self.slot_from(tail, (n - 1) as nat, next),
-                    tail[(n - 1) as int]));
+    /// The bits of an argument of type `ty` that starts at `slot`.
+    spec fn raw(self, args: Seq<u64>, ty: PrimType, slot: nat) -> u64 {
+        if self.splits(ty) {
+            (args[slot as int] & 0xFFFF_FFFFu64) | ((args[slot + 1 as int] & 0xFFFF_FFFFu64) << 32u64)
         } else {
-            assert(self.slot_from(sig, 1, slot) == self.next_slot(slot, sig[0]));
+            args[slot as int]
         }
     }
 
-    /// Each virtual argument consumes one slot on a 64-bit ABI.
-    proof fn lemma_slot_64(self, sig: Seq<PrimType>, n: nat, slot: nat)
-        requires
-            self == Arch::X86_64 || self == Arch::Aarch64,
-            n <= sig.len(),
-        ensures self.slot_from(sig, n, slot) == slot + n
-        decreases n
-    {
-        if n > 0 {
-            let next = self.next_slot(slot, sig[0]);
-            self.lemma_slot_64(sig.drop_first(), (n - 1) as nat, next);
-            assert(next == slot + 1);
-        }
-    }
-
-    /// A 64-bit ABI reads virtual argument `n` directly from slot `n`.
-    proof fn lemma_interp_64(self, args: Seq<u64>, sig: Seq<PrimType>, n: nat)
-        requires
-            self == Arch::X86_64 || self == Arch::Aarch64,
-            n < sig.len(),
-        ensures self.interp_args(args, sig)[n as int] == sig[n as int].cast(self, args[n as int])
-    {
+    /// Whether argument `n` of a syscall with signature `sig` starts at `slot`.
+    spec fn arg_at(self, sig: Seq<PrimType>, n: nat, slot: nat) -> bool {
+        forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX ==>
+            #[trigger] self.interp_args(args, sig)[n as int]
+                == sig[n as int].cast(self, self.raw(args, sig[n as int], slot))
     }
 
     /// x86 interpretation produces one value for each signature argument.
@@ -109,203 +76,148 @@ impl Arch {
         }
     }
 
-    /// x86 reads virtual argument `n` from its signature-derived physical slots.
-    proof fn lemma_interp_x86_at(args: Seq<u64>, sig: Seq<PrimType>, n: nat, start: nat)
-        requires
-            n < sig.len(),
-            start <= args.len(),
-            Arch::X86.slot_at(sig, n, start) < args.len(),
-            sig[n as int].bits(Arch::X86) == 64 ==>
-                Arch::X86.slot_at(sig, n, start) + 1 < args.len(),
-        ensures
-            Self::interp_args_x86(args.skip(start as int), sig)[n as int]
-                == sig[n as int].cast(Arch::X86,
-                    Arch::X86.physical_value(args, sig, n, start)),
-        decreases n
+    /// Reading from slot 0 is how the kernel reads the arguments.
+    proof fn lemma_from_start(self, args: Seq<u64>, sig: Seq<PrimType>)
+        ensures self.interp_from(args, sig, 0) =~= self.interp_args(args, sig)
     {
-        reveal_with_fuel(Arch::interp_args_x86, 2);
-        if n == 0 {
-            assert(Arch::X86.slot_at(sig, n, start) == start);
-            assert(args.skip(start as int)[0] == args[start as int]);
-            if sig[0].bits(Arch::X86) == 64 {
-                assert(args.skip(start as int)[1] == args[(start + 1) as int]);
-            }
-        } else {
-            let step: nat = if sig[0].bits(Arch::X86) == 64 { 2 } else { 1 };
-            let next = start + step;
-            let tail = sig.drop_first();
-            Arch::X86.lemma_slot_lower(tail, (n - 1) as nat, next);
-            assert(next <= Arch::X86.slot_at(sig, n, start));
-            assert(next <= args.len());
-            assert(Arch::X86.slot_at(tail, (n - 1) as nat, next)
-                == Arch::X86.slot_at(sig, n, start));
-            assert(tail[(n - 1) as int] == sig[n as int]);
-            assert(args.skip(start as int).skip(step as int) =~= args.skip(next as int));
-            Self::lemma_interp_x86_at(args, tail, (n - 1) as nat, next);
-            Self::lemma_interp_x86_len(args.skip(start as int), sig);
-            assert(Self::interp_args_x86(args.skip(start as int), sig)[n as int]
-                == Self::interp_args_x86(args.skip(next as int), tail)[(n - 1) as int]);
-            assert(Arch::X86.physical_value(args, sig, n, start)
-                == Arch::X86.physical_value(args, tail, (n - 1) as nat, next));
-        }
+        assert(args.skip(0) =~= args);
     }
 
-    /// ARM reads virtual argument `n` from its aligned physical slots.
-    proof fn lemma_interp_arm_at(args: Seq<u64>, sig: Seq<PrimType>, n: nat, start: nat)
-        requires
-            n < sig.len(),
-            Arch::Arm.slot_at(sig, n, start) < args.len(),
-            sig[n as int].bits(Arch::Arm) == 64 ==>
-                Arch::Arm.slot_at(sig, n, start) + 1 < args.len(),
-        ensures
-            Self::interp_args_arm(args, sig, start as int)[n as int]
-                == sig[n as int].cast(Arch::Arm,
-                    Arch::Arm.physical_value(args, sig, n, start)),
-        decreases n
+    /// Past the first argument read from `slot`, the rest are read from the next slot.
+    proof fn lemma_from_next(self, args: Seq<u64>, sig: Seq<PrimType>, slot: nat, j: int)
+        requires 0 < j < sig.len(), self.next_slot(slot, sig[0]) <= args.len()
+        ensures self.interp_from(args, sig, slot)[j]
+            == self.interp_from(args, sig.drop_first(), self.next_slot(slot, sig[0]))[j - 1]
     {
-        reveal_with_fuel(Arch::interp_args_arm, 2);
-        if n == 0 {
-            assert(Arch::Arm.slot_at(sig, n, start)
-                == if sig[0].bits(Arch::Arm) == 64 { start + start % 2 } else { start });
-        } else {
-            let next = Arch::Arm.next_slot(start, sig[0]);
-            let tail = sig.drop_first();
-            Arch::Arm.lemma_slot_lower(tail, (n - 1) as nat, next);
-            assert(next <= Arch::Arm.slot_at(sig, n, start));
-            assert(Arch::Arm.slot_at(tail, (n - 1) as nat, next)
-                == Arch::Arm.slot_at(sig, n, start));
-            assert(tail[(n - 1) as int] == sig[n as int]);
-            Self::lemma_interp_arm_at(args, tail, (n - 1) as nat, next);
-            Self::lemma_interp_arm_len(args, sig, start as int);
-            assert(Self::interp_args_arm(args, sig, start as int)[n as int]
-                == Self::interp_args_arm(args, tail, next as int)[(n - 1) as int]);
-            assert(Arch::Arm.physical_value(args, sig, n, start)
-                == Arch::Arm.physical_value(args, tail, (n - 1) as nat, next));
-        }
-    }
-
-    /// Argument interpretation agrees with the signature-derived physical slots.
-    proof fn lemma_interp_at(self, args: Seq<u64>, sig: Seq<PrimType>, n: nat)
-        requires
-            n < sig.len(),
-            self.slot_for(sig, n) < args.len(),
-            (self == Arch::X86 || self == Arch::Arm) && sig[n as int].bits(self) == 64 ==>
-                self.slot_for(sig, n) + 1 < args.len(),
-        ensures
-            self.interp_args(args, sig)[n as int]
-                == sig[n as int].cast(self, self.physical_value(args, sig, n, 0)),
-    {
+        let next = self.next_slot(slot, sig[0]);
         match self {
             Arch::X86 => {
-                Self::lemma_interp_x86_at(args, sig, n, 0);
-                Self::lemma_interp_x86_len(args, sig);
-                assert(args.skip(0) =~= args);
-                assert(self.interp_args(args, sig) == Self::interp_args_x86(args, sig));
-                assert(self.interp_args(args, sig)[n as int]
-                    == sig[n as int].cast(self, self.physical_value(args, sig, n, 0)));
+                let step: int = if sig[0].bits(self) == 64 { 2 } else { 1 };
+                if step == 2 {
+                    assert(args.skip(slot as int).skip(2) =~= args.skip(next as int));
+                } else {
+                    assert(args.skip(slot as int).drop_first() =~= args.skip(next as int));
+                }
+                Self::lemma_interp_x86_len(args.skip(next as int), sig.drop_first());
             }
-            Arch::Arm => {
-                Self::lemma_interp_arm_at(args, sig, n, 0);
-                Self::lemma_interp_arm_len(args, sig, 0);
-                assert(self.interp_args(args, sig) == Self::interp_args_arm(args, sig, 0));
-                assert(self.interp_args(args, sig)[n as int]
-                    == sig[n as int].cast(self, self.physical_value(args, sig, n, 0)));
-            }
-            Arch::X86_64 | Arch::Aarch64 => {
-                self.lemma_slot_64(sig, n, 0);
-                self.lemma_interp_64(args, sig, n);
-                assert(self.slot_for(sig, n) == n);
-                assert(self.interp_args(args, sig) == self.interp_args_64bit(args, sig));
-                assert(self.interp_args(args, sig)[n as int]
-                    == sig[n as int].cast(self, self.physical_value(args, sig, n, 0)));
+            Arch::Arm => Self::lemma_interp_arm_len(args, sig.drop_first(), next as int),
+            _ => {}
+        }
+    }
+
+    /// The first argument read from `slot` is its bits there, once aligned.
+    proof fn lemma_from_first(self, args: Seq<u64>, sig: Seq<PrimType>, slot: nat)
+        requires 0 < sig.len(), self.next_slot(slot, sig[0]) <= args.len()
+        ensures self.interp_from(args, sig, slot)[0] == sig[0].cast(self, self.raw(args, sig[0],
+            if self == Arch::Arm && self.splits(sig[0]) { slot + slot % 2 } else { slot }))
+    {
+        if self == Arch::X86 {
+            assert(args.skip(slot as int)[0] == args[slot as int]);
+            if self.splits(sig[0]) {
+                assert(args.skip(slot as int)[1] == args[slot + 1 as int]);
             }
         }
     }
 
-    /// The physical argument pattern has the low and high words in its selected slots.
-    proof fn lemma_physical_words(self, args: Seq<u64>, sig: Seq<PrimType>,
-        n: nat, slot: nat, low: u32, high: u32)
-        requires
-            n < sig.len(),
-            sig[n as int].bits(self) == 64,
-            slot == self.slot_for(sig, n),
-            slot < args.len(),
-            (self == Arch::X86 || self == Arch::Arm) ==> slot + 1 < args.len(),
-            low == (args[slot as int] & 0xFFFF_FFFF) as u32,
-            high == if self == Arch::X86 || self == Arch::Arm {
-                (args[(slot + 1) as int] & 0xFFFF_FFFF) as u32
+    /// The low and high words of the bits of a 64-bit argument that starts at `slot`.
+    proof fn lemma_raw_words(self, args: Seq<u64>, ty: PrimType, slot: nat)
+        requires ty.bits(self) == 64, slot < args.len(), self.splits(ty) ==> slot + 1 < args.len()
+        ensures
+            self.raw(args, ty, slot) as u32 == args[slot as int] as u32,
+            (self.raw(args, ty, slot) >> 32) as u32 == if self.splits(ty) {
+                args[slot + 1 as int] as u32
             } else {
                 (args[slot as int] >> 32) as u32
             },
-        ensures
-            self.physical_value(args, sig, n, 0) as u32 == low,
-            (self.physical_value(args, sig, n, 0) >> 32) as u32 == high,
     {
-        assert(self.slot_at(sig, n, 0) == slot);
-        if self == Arch::X86 || self == Arch::Arm {
-            let l = args[slot as int];
-            let h = args[(slot + 1) as int];
-            assert(self.physical_value(args, sig, n, 0)
-                == (l & 0xFFFF_FFFFu64) | ((h & 0xFFFF_FFFFu64) << 32u64));
-            assert((((l & 0xFFFF_FFFFu64) | ((h & 0xFFFF_FFFFu64) << 32u64)) as u32)
-                == (l & 0xFFFF_FFFFu64) as u32) by (bit_vector);
-            assert(((((l & 0xFFFF_FFFFu64) | ((h & 0xFFFF_FFFFu64) << 32u64))
-                >> 32u64) as u32) == (h & 0xFFFF_FFFFu64) as u32) by (bit_vector);
-            assert(self.physical_value(args, sig, n, 0) as u32 == low);
-            assert((self.physical_value(args, sig, n, 0) >> 32) as u32 == high);
-        } else {
-            assert(self.physical_value(args, sig, n, 0) == args[slot as int]);
-            let raw = args[slot as int];
-            assert(raw as u32 == (raw & 0xFFFF_FFFFu64) as u32) by (bit_vector);
-            assert(self.physical_value(args, sig, n, 0) as u32 == low);
-            assert((self.physical_value(args, sig, n, 0) >> 32) as u32 == high);
+        let l = args[slot as int];
+        if self.splits(ty) {
+            let h = args[slot + 1 as int];
+            assert((((l & 0xFFFF_FFFFu64) | ((h & 0xFFFF_FFFFu64) << 32u64)) as u32) == l as u32)
+                by (bit_vector);
+            assert(((((l & 0xFFFF_FFFFu64) | ((h & 0xFFFF_FFFFu64) << 32u64)) >> 32u64) as u32)
+                == h as u32) by (bit_vector);
         }
     }
 
-    /// The physical slot containing virtual argument `n`.
-    spec fn slot_at(self, sig: Seq<PrimType>, n: nat, start: nat) -> nat {
-        let slot = self.slot_from(sig, n, start);
-        if self == Arch::Arm && sig[n as int].bits(self) == 64 {
-            slot + slot % 2
-        } else {
-            slot
+    /// Returns the slot where argument `n` of a syscall with signature `sig` starts.
+    fn arg_slot(self, sig: &[PrimType], n: usize) -> (res: Result<u32, CompileError>)
+        requires n < sig@.len()
+        ensures res matches Ok(slot) ==> {
+            &&& slot < Rule::ARG_COUNT_MAX
+            &&& self.splits(sig@[n as int]) ==> slot + 1 < Rule::ARG_COUNT_MAX
+            &&& self.arg_at(sig@, n as nat, slot as nat)
         }
-    }
-
-    /// The physical slot containing virtual argument `n`.
-    spec fn slot_for(self, sig: Seq<PrimType>, n: nat) -> nat {
-        self.slot_at(sig, n, 0)
-    }
-
-    /// The raw bit pattern of virtual argument `n`.
-    spec fn physical_value(self, args: Seq<u64>, sig: Seq<PrimType>, n: nat, start: nat) -> u64 {
-        let slot = self.slot_at(sig, n, start);
-        if (self == Arch::X86 || self == Arch::Arm) && sig[n as int].bits(self) == 64 {
-            (args[slot as int] & 0xFFFF_FFFFu64)
-                | ((args[(slot + 1) as int] & 0xFFFF_FFFFu64) << 32u64)
-        } else {
-            args[slot as int]
-        }
-    }
-
-    /// A prefix never moves the next free slot backward.
-    proof fn lemma_slot_lower(self, sig: Seq<PrimType>, n: nat, start: nat)
-        requires n <= sig.len()
-        ensures self.slot_from(sig, n, start) >= start
-        decreases n
     {
-        if n > 0 {
-            let next = self.next_slot(start, sig[0]);
-            self.lemma_slot_lower(sig.drop_first(), (n - 1) as nat, next);
-            assert(next >= start);
+        let mut slot: u32 = 0;
+        let mut i: usize = 0;
+        proof {
+            assert(sig@.skip(0) =~= sig@);
+            assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+                #[trigger] self.interp_args(args, sig@)[n as int]
+                    == self.interp_from(args, sig@.skip(0), 0)[n as int] by {
+                self.lemma_from_start(args, sig@);
+            }
         }
+        while i < n
+            invariant
+                i <= n < sig@.len(),
+                slot <= Rule::ARG_COUNT_MAX,
+                forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX ==>
+                    #[trigger] self.interp_args(args, sig@)[n as int]
+                        == self.interp_from(args, sig@.skip(i as int), slot as nat)[n - i],
+            decreases n - i
+        {
+            let ghost prev = slot;
+            if self.exec_splits(sig[i]) {
+                if self == Arch::Arm && !slot.is_multiple_of(2) {
+                    slot += 1;
+                }
+                if slot > 4 {
+                    return Err(CompileError::SignatureLayout);
+                }
+                slot += 2;
+            } else {
+                if slot >= Rule::ARG_COUNT_MAX {
+                    return Err(CompileError::SignatureLayout);
+                }
+                slot += 1;
+            }
+            proof {
+                let rest = sig@.skip(i as int);
+                assert(rest.drop_first() =~= sig@.skip(i + 1));
+                assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+                    #[trigger] self.interp_args(args, sig@)[n as int]
+                        == self.interp_from(args, sig@.skip(i + 1), slot as nat)[n - i - 1] by {
+                    self.lemma_from_next(args, rest, prev as nat, n - i);
+                }
+            }
+            i += 1;
+        }
+        let ghost unaligned = slot;
+        let split = self.exec_splits(sig[n]);
+        if self == Arch::Arm && split && !slot.is_multiple_of(2) {
+            slot += 1;
+        }
+        if slot >= Rule::ARG_COUNT_MAX || split && slot > 4 {
+            return Err(CompileError::SignatureLayout);
+        }
+        proof {
+            let rest = sig@.skip(n as int);
+            assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+                #[trigger] self.interp_args(args, sig@)[n as int]
+                    == sig@[n as int].cast(self, self.raw(args, sig@[n as int], slot as nat)) by {
+                self.lemma_from_first(args, rest, unaligned as nat);
+            }
+        }
+        Ok(slot)
     }
 
-    /// Whether the architecture has 64-bit argument slots.
-    fn is_64bit(self) -> (res: bool)
-        ensures res == (self == Arch::X86_64 || self == Arch::Aarch64)
+    /// Executable version of [`Arch::splits`].
+    fn exec_splits(self, ty: PrimType) -> (res: bool)
+        ensures res == self.splits(ty)
     {
-        self == Arch::X86_64 || self == Arch::Aarch64
+        (self == Arch::X86 || self == Arch::Arm) && ty.exec_bits(self) == 64
     }
 }
 
@@ -456,40 +368,6 @@ impl PrimType {
     }
 }
 
-impl Action {
-    /// Executable version of [`Action::precedence`].
-    pub(super) fn priority(&self) -> (res: u8)
-        ensures res == self.precedence()
-    {
-        match self {
-            Action::KillProcess => 7,
-            Action::KillThread => 6,
-            Action::Trap(_) => 5,
-            Action::Errno(_) => 4,
-            Action::Notify => 3,
-            Action::Trace(_) => 2,
-            Action::Log => 1,
-            Action::Allow => 0,
-        }
-    }
-
-    /// Executable version of [`Action::to_ret`].
-    pub(super) fn exec_to_ret(&self) -> (res: u32)
-        ensures res == self.to_ret()
-    {
-        match self {
-            Action::KillProcess => Self::RET_KILL_PROCESS,
-            Action::KillThread => Self::RET_KILL_THREAD,
-            Action::Trap(data) => Self::RET_TRAP | *data as u32,
-            Action::Errno(data) => Self::RET_ERRNO | *data as u32,
-            Action::Trace(data) => Self::RET_TRACE | *data as u32,
-            Action::Log => Self::RET_LOG,
-            Action::Allow => Self::RET_ALLOW,
-            Action::Notify => Self::RET_USER_NOTIF,
-        }
-    }
-}
-
 impl Compare {
     /// Whether word `x` passes this comparison against `k`, with a `MaskedEq` word already masked.
     spec fn holds(self, x: u32, k: u32) -> bool {
@@ -501,6 +379,11 @@ impl Compare {
             Compare::Ge => x >= k,
             Compare::Gt => x > k,
         }
+    }
+
+    /// Whether this is one of the four ordering comparisons.
+    spec fn orders(self) -> bool {
+        self is Lt || self is Le || self is Gt || self is Ge
     }
 
     /// The jump, as [`Builder::emit_jump`] takes it, that leaves a failing one-word test.
@@ -516,33 +399,45 @@ impl Compare {
             Compare::Gt => (JmpOp::Gt, false),
         }
     }
+
+    /// Emits a test of the word at `at` that leaves for `fail` unless it passes.
+    ///
+    /// ```text
+    ///     ld  [at]
+    ///     and #mask               ; mask != 0xffffffff
+    ///     xor #bias               ; bias != 0
+    ///     j!<op> #k -> fail
+    /// ```
+    fn emit_test(self, b: &mut Builder, at: u32, mask: u32, bias: u32, k: u32, fail: Label)
+        -> (res: Result<(), CompileError>)
+        requires at % 4 == 0, 0 < fail <= b.rev@.len(), b.wf()
+        ensures
+            Builder::extends(old(b).rev@, final(b).rev@),
+            final(b).wf(),
+            res is Ok ==> forall |data: &[u8], a: u32| at + 4 <= data@.len()
+                && self.holds((Builder::word(data, at) & mask) ^ bias, k) ==>
+                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), a,
+                    old(b).rev@.len()),
+            res is Ok ==> forall |data: &[u8], a: u32| at + 4 <= data@.len()
+                && !self.holds((Builder::word(data, at) & mask) ^ bias, k) ==>
+                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), a,
+                    fail as nat),
+    {
+        let ghost pass = b.rev@;
+        let (jmp, expect) = self.fail_jump();
+        b.emit_jump(jmp, Src::K(k), expect, fail)?;
+        b.emit_load(at, mask, bias);
+        proof {
+            assert forall |data: &[u8], x: u32|
+                #[trigger] Builder::lands(pass, data, pass.len(), x, pass.len()) by {
+                assert(Builder::goes_to(pass, data, pass.len(), x, pass.len(), x));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ArgCmp {
-    /// The landing point selected by one argument test.
-    spec fn word_target(self, arch: Arch, syscall: Syscall, args: Seq<u64>,
-        pass: nat, fail: nat) -> nat {
-        if self.eval(arch, syscall, args) { pass } else { fail }
-    }
-
-    /// Typed evaluation reads the physical slots selected by the signature.
-    proof fn lemma_eval_physical(self, arch: Arch, syscall: Syscall, args: Seq<u64>,
-        sig: Seq<PrimType>)
-        requires
-            self.wf(arch, syscall),
-            sig =~= syscall.spec_signature(arch),
-            arch.slot_for(sig, self.arg as nat) < args.len(),
-            (arch == Arch::X86 || arch == Arch::Arm)
-                && sig[self.arg as int].bits(arch) == 64 ==>
-                arch.slot_for(sig, self.arg as nat) + 1 < args.len(),
-        ensures
-            self.eval(arch, syscall, args)
-                <==> self.typed_test(arch, sig[self.arg as int],
-                    arch.physical_value(args, sig, self.arg as nat, 0)),
-    {
-        arch.lemma_interp_at(args, sig, self.arg as nat);
-    }
-
     /// Evaluates this comparison on a typed argument bit pattern.
     spec fn typed_test(self, arch: Arch, ty: PrimType, value: u64) -> bool {
         let x = ty.cast(arch, value);
@@ -558,367 +453,151 @@ impl ArgCmp {
         }
     }
 
-    /// The result of the emitted one-word comparison on a raw bit pattern.
-    spec fn word_test(self, arch: Arch, ty: PrimType, value: u64) -> bool {
-        let width = ty.bits(arch);
-        let mask: u32 = if width == 16 { 0xFFFF } else { u32::MAX };
-        let order = self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge;
-        let bias: u32 = if ty.signed() && order {
-            if width == 16 { 0x8000 } else { 0x8000_0000 }
-        } else { 0 };
-        let x = ((value as u32) & mask) ^ bias;
-        let a = ((self.a as u32) & mask) ^ bias;
-        match self.op {
-            Compare::Eq => x == a,
-            Compare::Ne => x != a,
-            Compare::Lt => x < a,
-            Compare::Le => x <= a,
-            Compare::Ge => x >= a,
-            Compare::Gt => x > a,
-            Compare::MaskedEq => (value as u32) & (self.a as u32) == self.b as u32,
+    /// Whether the two-word test passes on the high and low words as it loads them.
+    spec fn wide_holds(self, high: u32, low: u32, k_hi: u32, k_lo: u32) -> bool {
+        if high == k_hi {
+            self.op.holds(low, k_lo)
+        } else if high > k_hi && self.op.orders() {
+            self.op is Gt || self.op is Ge
+        } else {
+            self.op is Ne || self.op is Lt || self.op is Le
         }
     }
 
-    /// The result of the emitted two-word comparison on a raw bit pattern.
-    spec fn wide_test(self, arch: Arch, ty: PrimType, low: u32, high: u32) -> bool {
-        let order = self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge;
-        let bias: u32 = if ty.signed() && order { 0x8000_0000 } else { 0 };
-        self.wide_words(low, high ^ bias, bias)
-    }
-
-    /// The two-word comparison after an optional sign-bit flip of the high word.
-    spec fn wide_words(self, low: u32, high: u32, bias: u32) -> bool {
-        let h = high;
-        let a_hi = ((self.a >> 32) as u32) ^ bias;
-        let a_lo = self.a as u32;
-        match self.op {
-            Compare::Eq => h == a_hi && low == a_lo,
-            Compare::Ne => h != a_hi || low != a_lo,
-            Compare::Lt => h < a_hi || (h == a_hi && low < a_lo),
-            Compare::Le => h < a_hi || (h == a_hi && low <= a_lo),
-            Compare::Gt => h > a_hi || (h == a_hi && low > a_lo),
-            Compare::Ge => h > a_hi || (h == a_hi && low >= a_lo),
-            Compare::MaskedEq =>
-                (high & ((self.a >> 32) as u32) == (self.b >> 32) as u32)
-                    && (low & (self.a as u32) == self.b as u32),
-        }
-    }
-
-    /// The landing point selected by a two-word comparison.
-    spec fn wide_target(self, low: u32, high: u32, bias: u32,
-        pass: nat, fail: nat) -> nat {
-        if self.wide_words(low, high, bias) { pass } else { fail }
-    }
-
-    /// The target when the high word exceeds the comparison value.
-    spec fn high_gt_target(self, pass: nat, fail: nat) -> nat {
-        if self.op is Lt || self.op is Le { fail } else { pass }
-    }
-
-    /// The target when unequal high words reach the equality test.
-    spec fn high_neq_target(self, pass: nat, fail: nat) -> nat {
-        if self.op is Ne || self.op is Lt || self.op is Le { pass } else { fail }
-    }
-
-    /// Typed comparison agrees with the two-word instruction condition.
-    proof fn lemma_wide_truth(self, arch: Arch, syscall: Syscall, sig: Seq<PrimType>,
-        args: Seq<u64>, slot: u32)
+    /// Typed comparison of a 64-bit argument agrees with the two-word test.
+    #[allow(clippy::too_many_arguments)]
+    proof fn lemma_wide_truth(self, arch: Arch, syscall: Syscall, x: u64,
+        mask_hi: u32, mask_lo: u32, bias: u32, k_hi: u32, k_lo: u32)
         requires
             self.wf(arch, syscall),
-            sig =~= syscall.spec_signature(arch),
-            slot as nat == arch.slot_for(sig, self.arg as nat),
-            slot < args.len(),
-            sig[self.arg as int].bits(arch) == 64,
-            (arch == Arch::X86 || arch == Arch::Arm) ==> slot + 1 < args.len(),
+            syscall.spec_signature(arch)[self.arg as int].bits(arch) == 64,
+            bias == if syscall.spec_signature(arch)[self.arg as int].signed() && self.op.orders() {
+                0x8000_0000u32 } else { 0 },
+            mask_hi == if self.op is MaskedEq { (self.a >> 32) as u32 } else { u32::MAX },
+            mask_lo == if self.op is MaskedEq { self.a as u32 } else { u32::MAX },
+            k_hi == if self.op is MaskedEq { (self.b >> 32) as u32 }
+                else { ((self.a >> 32) as u32) ^ bias },
+            k_lo == if self.op is MaskedEq { self.b as u32 } else { self.a as u32 },
         ensures
-            self.eval(arch, syscall, args) <==> {
-                let x = arch.physical_value(args, sig, self.arg as nat, 0);
-                self.wide_test(arch, sig[self.arg as int], x as u32, (x >> 32) as u32)
-            },
+            self.typed_test(arch, syscall.spec_signature(arch)[self.arg as int], x)
+                <==> self.wide_holds((((x >> 32) as u32) & mask_hi) ^ bias,
+                    (x as u32) & mask_lo, k_hi, k_lo),
     {
-        reveal(ArgCmp::typed_test);
-        reveal(ArgCmp::wide_test);
-        let ty = sig[self.arg as int];
-        self.lemma_eval_physical(arch, syscall, args, sig);
-        let x = arch.physical_value(args, sig, self.arg as nat, 0);
+        let ty = syscall.spec_signature(arch)[self.arg as int];
         let a = self.a;
+        let high = (x >> 32) as u32;
+        let low = x as u32;
         assert(ty.mask(arch) == u64::MAX);
         assert((x & u64::MAX) == x) by (bit_vector);
         assert((a & u64::MAX) == a) by (bit_vector);
-        let high = (x >> 32) as u32;
-        let a_high = (a >> 32) as u32;
-        assert((high ^ 0u32) == high) by (bit_vector);
-        assert((a_high ^ 0u32) == a_high) by (bit_vector);
+        assert((high & u32::MAX) ^ 0u32 == high) by (bit_vector);
+        assert(((a >> 32) as u32) ^ 0u32 == (a >> 32) as u32) by (bit_vector);
+        assert((low & u32::MAX) == low) by (bit_vector);
         if self.op is Eq || self.op is Ne {
             ty.lemma_cast_eq(arch, x, a);
             Self::lemma_words(x, a);
-            assert(self.typed_test(arch, ty, x)
-                <==> self.wide_test(arch, ty, x as u32, (x >> 32) as u32));
         } else if self.op is MaskedEq {
             ty.lemma_cast_bits(arch, x);
             Self::lemma_words(x, a);
             Self::lemma_words(x & a, self.b);
-            assert(self.typed_test(arch, ty, x)
-                <==> self.wide_test(arch, ty, x as u32, (x >> 32) as u32));
+            assert((high & mask_hi) ^ 0u32 == high & mask_hi) by (bit_vector);
         } else if ty.signed() {
             ty.lemma_signed_bias_64(arch, x, a);
             ty.lemma_signed_bias_64(arch, a, x);
             let sign = 0x8000_0000_0000_0000u64;
-            let bx = x ^ sign;
-            let ba = a ^ sign;
-            Self::lemma_words(bx, ba);
-            assert((((x ^ sign) >> 32) as u32)
-                == (((x >> 32) as u32) ^ 0x8000_0000u32))
+            Self::lemma_words(x ^ sign, a ^ sign);
+            assert((((x ^ sign) >> 32) as u32) == ((((x >> 32) as u32) & u32::MAX) ^ 0x8000_0000u32))
                 by (bit_vector) requires sign == 0x8000_0000_0000_0000u64;
-            assert((((a ^ sign) >> 32) as u32)
-                == (((a >> 32) as u32) ^ 0x8000_0000u32))
+            assert((((a ^ sign) >> 32) as u32) == (((a >> 32) as u32) ^ 0x8000_0000u32))
                 by (bit_vector) requires sign == 0x8000_0000_0000_0000u64;
             assert(((x ^ sign) as u32) == (x as u32)) by (bit_vector)
                 requires sign == 0x8000_0000_0000_0000u64;
             assert(((a ^ sign) as u32) == (a as u32)) by (bit_vector)
                 requires sign == 0x8000_0000_0000_0000u64;
-            assert(self.typed_test(arch, ty, x)
-                <==> self.wide_test(arch, ty, x as u32, (x >> 32) as u32));
         } else {
             Self::lemma_words(x, a);
-            assert(!ty.signed());
             assert(ty.cast(arch, x) == x as int);
             assert(ty.cast(arch, a) == a as int);
-            assert(self.typed_test(arch, ty, x)
-                <==> self.wide_test(arch, ty, x as u32, (x >> 32) as u32));
         }
     }
 
-    /// Typed comparison agrees with the one-word instruction condition.
-    proof fn lemma_word_truth(self, arch: Arch, syscall: Syscall, sig: Seq<PrimType>,
-        args: Seq<u64>, slot: u32, width: u32)
+    /// Typed comparison of an argument that fits in one word agrees with the one-word test.
+    #[allow(clippy::too_many_arguments)]
+    proof fn lemma_word_truth(self, arch: Arch, syscall: Syscall, x: u64,
+        mask: u32, bias: u32, k: u32)
         requires
             self.wf(arch, syscall),
-            sig =~= syscall.spec_signature(arch),
-            slot as nat == arch.slot_for(sig, self.arg as nat),
-            slot < args.len(),
-            width as u64 == sig[self.arg as int].bits(arch),
-            width == 16 || width == 32,
+            ({
+                let ty = syscall.spec_signature(arch)[self.arg as int];
+                let width = ty.bits(arch);
+                &&& width == 16 || width == 32
+                &&& mask == if self.op is MaskedEq { self.a as u32 }
+                    else if width == 16 { 0xFFFFu32 } else { u32::MAX }
+                &&& bias == if ty.signed() && self.op.orders() {
+                    if width == 16 { 0x8000u32 } else { 0x8000_0000u32 }
+                } else { 0 }
+                &&& k == if self.op is MaskedEq { self.b as u32 }
+                    else { ((self.a as u32) & mask) ^ bias }
+            }),
         ensures
-            self.eval(arch, syscall, args)
-                <==> self.word_test(arch, sig[self.arg as int], args[slot as int]),
+            self.typed_test(arch, syscall.spec_signature(arch)[self.arg as int], x)
+                <==> self.op.holds(((x as u32) & mask) ^ bias, k),
     {
-        reveal(ArgCmp::typed_test);
-        reveal(ArgCmp::word_test);
-        let ty = sig[self.arg as int];
-        self.lemma_eval_physical(arch, syscall, args, sig);
-        let x = arch.physical_value(args, sig, self.arg as nat, 0);
-        assert(x == args[slot as int]);
+        let ty = syscall.spec_signature(arch)[self.arg as int];
+        let a = self.a;
+        let b = self.b;
+        let type_mask = ty.mask(arch);
         if ty.bits(arch) == 16 {
             assert(((1u64 << 16u64) - 1) == 0xFFFF) by (bit_vector);
-            assert(ty.mask(arch) == 0xFFFF);
         } else {
             assert(((1u64 << 32u64) - 1) == 0xFFFF_FFFF) by (bit_vector);
-            assert(ty.mask(arch) == 0xFFFF_FFFF);
         }
-        let mask: u32 = if width == 16 { 0xFFFF } else { u32::MAX };
-        let a = self.a;
-        let xv = x;
-        assert(ty.mask(arch) == mask as u64);
-        assert(((xv & (mask as u64)) as u32) == ((xv as u32) & mask))
-            by (bit_vector);
-        assert(((a & (mask as u64)) as u32) == ((a as u32) & mask))
-            by (bit_vector);
-        assert((xv & (mask as u64) == a & (mask as u64))
-            <==> (((xv as u32) & mask) == ((a as u32) & mask))) by (bit_vector);
-        let low_x = (x as u32) & mask;
-        let low_a = (a as u32) & mask;
-        assert((low_x ^ 0u32) == low_x) by (bit_vector);
-        assert((low_a ^ 0u32) == low_a) by (bit_vector);
-        if self.op is Eq || self.op is Ne {
-            ty.lemma_cast_eq(arch, x, self.a);
-            assert(!(self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge));
-            assert(ty.bits(arch) == width as u64);
-            assert((if ty.bits(arch) == 16 { 0xFFFFu32 } else { u32::MAX }) == mask);
-            assert((ty.cast(arch, x) == ty.cast(arch, a))
-                <==> (x & ty.mask(arch) == a & ty.mask(arch)));
-            assert((ty.cast(arch, x) == ty.cast(arch, a))
-                <==> (((x as u32) & mask) == ((a as u32) & mask)));
-            if self.op is Eq {
-                assert(self.typed_test(arch, ty, x)
-                    == (ty.cast(arch, x) == ty.cast(arch, a)));
-                assert(self.word_test(arch, ty, x)
-                    == (((x as u32) & mask) == ((a as u32) & mask)));
-            } else {
-                assert(self.typed_test(arch, ty, x)
-                    == (ty.cast(arch, x) != ty.cast(arch, a)));
-                assert(self.word_test(arch, ty, x)
-                    == (((x as u32) & mask) != ((a as u32) & mask)));
-            }
-            assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
-        } else if self.op is MaskedEq {
+        if self.op is MaskedEq {
             ty.lemma_cast_bits(arch, x);
-            let m = ty.mask(arch);
-            let b = self.b;
-            assert(((xv & m) & a == b) <==> (((xv as u32) & (a as u32)) == (b as u32)))
+            assert(((x & type_mask) & a == b) <==> ((((x as u32) & (a as u32)) ^ 0u32) == (b as u32)))
                 by (bit_vector)
-                requires a & !m == 0, b & !a == 0, m == 0xFFFF || m == 0xFFFF_FFFF;
-            assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
-        } else if ty.signed() {
-            ty.lemma_signed_bias(arch, x, self.a);
-            ty.lemma_signed_bias(arch, self.a, x);
-            let type_mask = ty.mask(arch);
-            let bias64: u64 = ((type_mask >> 1u64) + 1) as u64;
-            let bias32: u32 = if width == 16 { 0x8000 } else { 0x8000_0000 };
-            if width == 16 {
-                assert((type_mask >> 1u64) == 0x7FFF) by (bit_vector)
-                    requires type_mask == 0xFFFF;
-            } else {
-                assert((type_mask >> 1u64) == 0x7FFF_FFFF) by (bit_vector)
-                    requires type_mask == 0xFFFF_FFFF;
-            }
-            assert(bias64 == bias32 as u64);
-            assert(((((x & (mask as u64)) ^ (bias32 as u64)) as u32)
-                == (((x as u32) & mask) ^ bias32)))
-                by (bit_vector)
-                requires type_mask == mask as u64, bias64 == bias32 as u64;
-            assert(((((a & (mask as u64)) ^ (bias32 as u64)) as u32)
-                == (((a as u32) & mask) ^ bias32)))
-                by (bit_vector)
-                requires type_mask == mask as u64, bias64 == bias32 as u64;
-            assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
+                requires a & !type_mask == 0, b & !a == 0,
+                    type_mask == 0xFFFF || type_mask == 0xFFFF_FFFF;
         } else {
-            assert(ty.cast(arch, x) == (x & ty.mask(arch)) as int);
-            assert(ty.cast(arch, a) == (a & ty.mask(arch)) as int);
-            assert((x & (mask as u64)) == (((x as u32) & mask) as u64)) by (bit_vector);
-            assert((a & (mask as u64)) == (((a as u32) & mask) as u64)) by (bit_vector);
-            assert(self.typed_test(arch, ty, x) <==> self.word_test(arch, ty, x));
-        }
-    }
-
-    /// The load at the front of `ext` hands the word it reads to the code behind it.
-    proof fn lemma_load(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], k: u32, a: u32, to: nat)
-        requires
-            ext == rev.push(Instr::LdAbs(k)),
-            k + 4 <= data@.len(),
-            Builder::lands(rev, data, rev.len(), Builder::word(data, k), to),
-        ensures Builder::lands(ext, data, ext.len(), a, to)
-    {
-        assert(Builder::extends(rev, ext));
-        assert(ext[ext.len() - 1] == Instr::LdAbs(k));
-        Builder::lemma_ld(ext, k);
-        assert(Builder::goes_to(ext, data, ext.len(), a, rev.len(), Builder::word(data, k)));
-        Builder::lemma_then(rev, ext, data, ext.len(), a, rev.len(),
-            Builder::word(data, k), to, 0);
-    }
-
-    /// A landing behind `rev` is still one once the code in front of it has carried on there.
-    proof fn lemma_step(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], a: u32, mid: nat, m: u32, to: nat)
-        requires
-            Builder::extends(rev, ext),
-            Builder::goes_to(ext, data, ext.len(), a, mid, m),
-            Builder::lands(rev, data, mid, m, to),
-        ensures Builder::lands(ext, data, ext.len(), a, to)
-    {
-        Builder::lemma_then(rev, ext, data, ext.len(), a, mid, m, to, 0);
-    }
-
-    /// The mask at the front of `ext` hands the masked word to the code behind it.
-    proof fn lemma_mask(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], k: u32, a: u32)
-        requires ext == rev.push(Instr::Alu(AluOp::And, Src::K(k)))
-        ensures Builder::goes_to(ext, data, ext.len(), a, rev.len(), a & k)
-    {
-        Builder::lemma_alu(ext, AluOp::And, k);
-        assert(Builder::goes_to(ext, data, ext.len(), a, (ext.len() - 1) as nat,
-            AluOp::And.eval(a, k)));
-    }
-
-    /// The two-word test lands where its high word, and then its low word, send it.
-    proof fn lemma_branch(self, s1: Seq<Instr>, s2: Seq<Instr>, s3: Seq<Instr>,
-        s4: Seq<Instr>, s5: Seq<Instr>, s6: Seq<Instr>, lo: u32, bias: u32,
-        k_lo: u32, k_hi: u32, pass: nat, fail: nat)
-        requires
-            lo <= 60,
-            k_lo == if self.op is MaskedEq { self.b as u32 } else { self.a as u32 },
-            k_hi == if self.op is MaskedEq { (self.b >> 32) as u32 }
-                else { ((self.a >> 32) as u32) ^ bias },
-            s2 == if self.op is MaskedEq {
-                s1.push(Instr::Alu(AluOp::And, Src::K(self.a as u32)))
-            } else { s1 },
-            s3 == s2.push(Instr::LdAbs(lo)),
-            Builder::extends(s3, s4),
-            Builder::extends(s4, s5),
-            s6 == if self.op is MaskedEq {
-                s5.push(Instr::Alu(AluOp::And, Src::K((self.a >> 32) as u32)))
-            } else { s5 },
-            forall |data: &[u8], a: u32| !self.op.holds(a, k_lo) ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, fail, a),
-            forall |data: &[u8], a: u32| self.op.holds(a, k_lo) ==>
-                #[trigger] Builder::goes_to(s1, data, s1.len(), a, pass, a),
-            forall |data: &[u8], h: u32| h == k_hi ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), h, s3.len(), h),
-            forall |data: &[u8], h: u32| h != k_hi ==>
-                #[trigger] Builder::goes_to(s4, data, s4.len(), h,
-                    self.high_neq_target(pass, fail), h),
-            (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge) ==> {
-                &&& forall |data: &[u8], h: u32| h > k_hi ==>
-                    #[trigger] Builder::goes_to(s5, data, s5.len(), h,
-                        self.high_gt_target(pass, fail), h)
-                &&& forall |data: &[u8], h: u32| h <= k_hi ==>
-                    #[trigger] Builder::goes_to(s5, data, s5.len(), h, s4.len(), h)
-            },
-            !(self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge) ==> s5 == s4,
-        ensures
-            forall |data: &[u8], h: u32| Event::parse(data) is Some ==>
-                #[trigger] Builder::lands(s6, data, s6.len(), h,
-                    self.wide_target(Builder::word(data, lo), h, bias, pass, fail)),
-    {
-        let masked = self.op is MaskedEq;
-        let order = self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge;
-        let a_lo = self.a as u32;
-        let a_hi = (self.a >> 32) as u32;
-        assert forall |data: &[u8], h: u32| Event::parse(data) is Some implies
-            #[trigger] Builder::lands(s6, data, s6.len(), h,
-                self.wide_target(Builder::word(data, lo), h, bias, pass, fail)) by {
-            let low = Builder::word(data, lo);
-            let target = self.wide_target(low, h, bias, pass, fail);
-            let l = if masked { low & a_lo } else { low };
-            let m = if masked { h & a_hi } else { h };
-            if m == k_hi {
-                if self.op.holds(l, k_lo) {
-                    assert(target == pass);
-                    assert(Builder::goes_to(s1, data, s1.len(), l, pass, l));
+            let narrow = mask;
+            assert(type_mask == narrow as u64);
+            assert(((x & (narrow as u64)) as u32) == ((x as u32) & narrow)) by (bit_vector);
+            assert(((a & (narrow as u64)) as u32) == ((a as u32) & narrow)) by (bit_vector);
+            if self.op is Eq || self.op is Ne {
+                ty.lemma_cast_eq(arch, x, a);
+                assert(bias == 0);
+                assert((((x as u32) & narrow) ^ 0u32) == ((x as u32) & narrow)) by (bit_vector);
+                assert((((a as u32) & narrow) ^ 0u32) == ((a as u32) & narrow)) by (bit_vector);
+                assert((x & type_mask == a & type_mask)
+                    <==> (((x as u32) & narrow) == ((a as u32) & narrow))) by (bit_vector)
+                    requires type_mask == narrow as u64;
+            } else if ty.signed() {
+                ty.lemma_signed_bias(arch, x, a);
+                ty.lemma_signed_bias(arch, a, x);
+                if ty.bits(arch) == 16 {
+                    assert((type_mask >> 1u64) == 0x7FFF) by (bit_vector)
+                        requires type_mask == 0xFFFF;
                 } else {
-                    assert(target == fail);
-                    assert(Builder::goes_to(s1, data, s1.len(), l, fail, l));
+                    assert((type_mask >> 1u64) == 0x7FFF_FFFF) by (bit_vector)
+                        requires type_mask == 0xFFFF_FFFF;
                 }
-                assert(Builder::lands(s1, data, s1.len(), l, target));
-                if masked {
-                    Self::lemma_mask(s1, s2, data, a_lo, low);
-                    Self::lemma_step(s1, s2, data, low, s1.len(), l, target);
-                }
-                assert(Builder::lands(s2, data, s2.len(), low, target));
-                Self::lemma_load(s2, s3, data, lo, m, target);
-                assert(Builder::goes_to(s4, data, s4.len(), m, s3.len(), m));
-                Self::lemma_step(s3, s4, data, m, s3.len(), m, target);
-            } else if order && m > k_hi {
-                assert(target == self.high_gt_target(pass, fail));
-                assert(Builder::goes_to(s5, data, s5.len(), m, target, m));
+                assert(((type_mask >> 1u64) + 1) as u64 == bias as u64);
+                assert((((x & (narrow as u64)) ^ (bias as u64)) as u32)
+                    == (((x as u32) & narrow) ^ bias)) by (bit_vector);
+                assert((((a & (narrow as u64)) ^ (bias as u64)) as u32)
+                    == (((a as u32) & narrow) ^ bias)) by (bit_vector);
             } else {
-                assert(target == self.high_neq_target(pass, fail));
-                assert(Builder::goes_to(s4, data, s4.len(), m, target, m));
-            }
-            if order && m <= k_hi {
-                assert(Builder::goes_to(s5, data, s5.len(), m, s4.len(), m));
-                Self::lemma_step(s4, s5, data, m, s4.len(), m, target);
-            }
-            assert(Builder::lands(s5, data, s5.len(), m, target));
-            if masked {
-                Self::lemma_mask(s5, s6, data, a_hi, h);
-                Self::lemma_step(s5, s6, data, h, s5.len(), m, target);
+                assert(bias == 0);
+                assert(ty.cast(arch, x) == (x & type_mask) as int);
+                assert(ty.cast(arch, a) == (a & type_mask) as int);
+                assert((x & (narrow as u64)) == ((((x as u32) & narrow) ^ 0u32) as u64)) by (bit_vector);
+                assert((a & (narrow as u64)) == ((((a as u32) & narrow) ^ 0u32) as u64)) by (bit_vector);
             }
         }
     }
-}
 
-impl ArgCmp {
     /// Emits a typed argument comparison using the syscall's physical argument slots.
-    fn emit(&self, b: &mut Builder, arch: Arch, syscall: Syscall,
+    fn emit(&self, b: &mut Builder, arch: Arch, Ghost(syscall): Ghost<Syscall>,
         sig: &[PrimType], fail: Label) -> (res: Result<(), CompileError>)
         requires
             self.wf(arch, syscall),
@@ -937,339 +616,142 @@ impl ArgCmp {
                 #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
                     a, fail as nat),
     {
-        let mut slot: u32 = 0;
-        let mut i: usize = 0;
-        while i < self.arg as usize
-            invariant
-                i <= self.arg as usize,
-                i <= sig@.len(),
-                slot <= Rule::ARG_COUNT_MAX,
-                slot as nat == arch.slot_before(sig@, i as nat),
-                self.wf(arch, syscall),
-                sig@ =~= syscall.spec_signature(arch),
-                b.wf(),
-                0 < fail <= b.rev@.len(),
-            decreases (self.arg as usize) - i
-        {
-            let width = sig[i].exec_bits(arch);
-            if (arch == Arch::X86 || arch == Arch::Arm) && width == 64 {
-                if arch == Arch::Arm && !slot.is_multiple_of(2) {
-                    slot += 1;
-                }
-                if slot > 4 {
-                    return Err(CompileError::SignatureLayout);
-                }
-                slot += 2;
-            } else {
-                if slot >= Rule::ARG_COUNT_MAX {
-                    return Err(CompileError::SignatureLayout);
-                }
-                slot += 1;
-            }
-            proof {
-                arch.lemma_slot_next(sig@, i as nat, 0);
-                assert(slot as nat == arch.slot_before(sig@, (i + 1) as nat));
-            }
-            i += 1;
-        }
+        let slot = arch.arg_slot(sig, self.arg as usize)?;
         let ty = sig[self.arg as usize];
         let width = ty.exec_bits(arch);
-        if width != 16 && width != 32 && width != 64 {
+        if width == 64 {
+            return self.emit_wide(b, arch, Ghost(syscall), ty, slot, fail);
+        }
+        if width != 16 && width != 32 {
             return Err(CompileError::UnsupportedArgWidth(width));
         }
-        if arch == Arch::Arm && width == 64 && !slot.is_multiple_of(2) {
-            slot += 1;
-        }
-        proof {
-            assert(slot as nat == arch.slot_for(sig@, self.arg as nat));
-        }
-        if slot >= Rule::ARG_COUNT_MAX
-            || width == 64 && !arch.is_64bit() && slot > 4 {
-            return Err(CompileError::SignatureLayout);
-        }
 
-        let order = self.op == Compare::Lt || self.op == Compare::Le
-            || self.op == Compare::Gt || self.op == Compare::Ge;
-        let signed_order = ty.exec_signed() && order;
-        if width <= 32 {
-            self.emit_word(b, arch, syscall, sig, slot, width, signed_order, fail)
-        } else {
-            self.emit_wide(b, arch, syscall, sig, slot, signed_order, fail)
-        }
-    }
-
-    /// Emits a comparison of an argument that fits in one word.
-    ///
-    /// ```text
-    ///     ld  [lo]
-    ///     and #0xffff             ; 16-bit, not MaskedEq
-    ///     xor #bias               ; signed ordering
-    ///     and #a                  ; MaskedEq
-    ///     j!<op> #k -> fail
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn emit_word(&self, b: &mut Builder, _arch: Arch, _syscall: Syscall,
-        _sig: &[PrimType], slot: u32, width: u32, signed_order: bool,
-        fail: Label) -> (res: Result<(), CompileError>)
-        requires
-            self.wf(_arch, _syscall),
-            _sig@ =~= _syscall.spec_signature(_arch),
-            slot as nat == _arch.slot_for(_sig@, self.arg as nat),
-            slot < Rule::ARG_COUNT_MAX,
-            width == 16 || width == 32,
-            width as u64 == _sig@[self.arg as int].bits(_arch),
-            signed_order == (_sig@[self.arg as int].signed() &&
-                (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge)),
-            0 < fail <= b.rev@.len(),
-            b.wf(),
-        ensures
-            Builder::extends(old(b).rev@, final(b).rev@),
-            final(b).wf(),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.eval(_arch, _syscall, Event::of(data).args) ==>
-                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
-                    a, old(b).rev@.len()),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.eval(_arch, _syscall, Event::of(data).args) ==>
-                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
-                    a, fail as nat),
-    {
-        let ghost pass: nat = b.rev@.len();
+        // An argument that fits in one word:
+        //
+        //      ld  [lo]
+        //      and #0xffff             ; 16-bit, not MaskedEq
+        //      and #a                  ; MaskedEq, unless all ones
+        //      xor #bias               ; signed ordering
+        //      j!<op> #k -> fail
         let lo = Policy::OFFSET_EVENT_ARGS + 8 * slot;
         let masked = self.op == Compare::MaskedEq;
-        let mask: u32 = if width == 16 { 0xFFFF } else { u32::MAX };
-        let bias: u32 = if signed_order {
+        let order = self.op == Compare::Lt || self.op == Compare::Le
+            || self.op == Compare::Gt || self.op == Compare::Ge;
+        let mask: u32 = if masked { self.a as u32 } else if width == 16 { 0xFFFF } else { u32::MAX };
+        let bias: u32 = if ty.exec_signed() && order {
             if width == 16 { 0x8000 } else { 0x8000_0000 }
         } else { 0 };
         let k = if masked { self.b as u32 } else { (self.a as u32 & mask) ^ bias };
-        let (jmp, expect) = self.op.fail_jump();
-        b.emit_jump(jmp, Src::K(k), expect, fail)?;
-        let ghost r_jump = b.rev@;
-        if masked {
-            b.emit(Instr::Alu(AluOp::And, Src::K(self.a as u32)));
-        } else if signed_order {
-            b.emit(Instr::Alu(AluOp::Xor, Src::K(bias)));
-        }
-        let ghost r_xor = b.rev@;
-        if !masked && width < 32 {
-            b.emit(Instr::Alu(AluOp::And, Src::K(mask)));
-        }
-        let ghost r_and = b.rev@;
-        b.emit(Instr::LdAbs(lo));
+        self.op.emit_test(b, lo, mask, bias, k, fail)?;
         proof {
-            assert forall |data: &[u8], incoming: u32| Event::parse(data) is Some implies
-                #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(_arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)) by {
-                let ev = Event::of(data);
+            assert forall |data: &[u8]| #[trigger] Event::parse(data) is Some implies
+                (self.eval(arch, syscall, Event::of(data).args)
+                    <==> self.op.holds((Builder::word(data, lo) & mask) ^ bias, k)) by {
+                let args = Event::of(data).args;
                 Event::lemma_image(data);
-                self.lemma_word_truth(_arch, _syscall, _sig@, ev.args, slot, width);
-                let raw = ev.args[slot as int];
-                let word = Builder::word(data, lo);
-                assert(word == (raw & 0xFFFF_FFFF) as u32);
-                assert((raw & 0xFFFF_FFFF) as u32 == raw as u32) by (bit_vector);
-                assert((word & u32::MAX) == word) by (bit_vector);
-                let narrowed = if !masked && width == 16 { word & mask } else { word };
-                let tested = if masked { narrowed & (self.a as u32) }
-                    else if signed_order { narrowed ^ bias } else { narrowed };
-                let target = self.word_target(_arch, _syscall, ev.args,
-                    pass as nat, fail as nat);
-                assert((narrowed ^ 0u32) == narrowed) by (bit_vector);
-                assert(self.eval(_arch, _syscall, ev.args) == self.op.holds(tested, k));
-                if self.op.holds(tested, k) {
-                    assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, pass, tested));
-                } else {
-                    assert(Builder::goes_to(r_jump, data, r_jump.len(), tested, fail as nat,
-                        tested));
-                }
-                assert(Builder::lands(r_jump, data, r_jump.len(), tested, target));
-                if masked {
-                    Self::lemma_mask(r_jump, r_xor, data, self.a as u32, word);
-                    Self::lemma_step(r_jump, r_xor, data, word, r_jump.len(), tested, target);
-                } else if signed_order {
-                    Builder::lemma_alu(r_xor, AluOp::Xor, bias);
-                    assert(Builder::goes_to(r_xor, data, r_xor.len(), narrowed,
-                        r_jump.len(), tested));
-                    Self::lemma_step(r_jump, r_xor, data, narrowed, r_jump.len(),
-                        tested, target);
-                } else {
-                    assert(r_xor == r_jump);
-                }
-                if !masked && width == 16 {
-                    Self::lemma_mask(r_xor, r_and, data, mask, word);
-                    Self::lemma_step(r_xor, r_and, data, word, r_xor.len(),
-                        narrowed, target);
-                } else {
-                    assert(r_and == r_xor);
-                }
-                Self::lemma_load(r_and, b.rev@, data, lo, incoming, target);
-            }
-            assert forall |data: &[u8], incoming: u32|
-                Event::parse(data) is Some
-                    && self.eval(_arch, _syscall, Event::of(data).args)
-                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(),
-                    incoming, pass as nat) by {
-                assert(Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(_arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)));
-            }
-            assert forall |data: &[u8], incoming: u32|
-                Event::parse(data) is Some
-                    && !self.eval(_arch, _syscall, Event::of(data).args)
-                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(),
-                    incoming, fail as nat) by {
-                assert(Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(_arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)));
+                let x = args[slot as int];
+                assert(arch.interp_args(args, sig@)[self.arg as int]
+                    == ty.cast(arch, arch.raw(args, ty, slot as nat)));
+                self.lemma_word_truth(arch, syscall, x, mask, bias, k);
+                assert((x & 0xFFFF_FFFF) as u32 == x as u32) by (bit_vector);
             }
         }
         Ok(())
     }
 
-    /// Emits a two-word comparison for a 64-bit argument.
+    /// Emits a two-word comparison of a 64-bit argument.
     ///
     /// ```text
     ///     ld  [hi]
+    ///     and #a_hi               ; MaskedEq, unless all ones
     ///     xor #0x80000000         ; signed ordering
-    ///     and #a_hi               ; MaskedEq
     ///     jgt #k_hi -> gt         ; ordering
     ///     jne #k_hi -> neq
     ///     ld  [lo]
-    ///     and #a_lo               ; MaskedEq
+    ///     and #a_lo               ; MaskedEq, unless all ones
     ///     j!<op> #k_lo -> fail
     /// ```
-    #[allow(clippy::too_many_arguments)]
-    #[verifier::spinoff_prover]
-    fn emit_wide(&self, b: &mut Builder, arch: Arch, _syscall: Syscall,
-        _sig: &[PrimType], slot: u32, signed_order: bool,
-        fail: Label) -> (res: Result<(), CompileError>)
+    fn emit_wide(&self, b: &mut Builder, arch: Arch, Ghost(syscall): Ghost<Syscall>,
+        ty: PrimType, slot: u32, fail: Label) -> (res: Result<(), CompileError>)
         requires
-            self.wf(arch, _syscall),
-            _sig@ =~= _syscall.spec_signature(arch),
-            slot as nat == arch.slot_for(_sig@, self.arg as nat),
+            self.wf(arch, syscall),
+            ty == syscall.spec_signature(arch)[self.arg as int],
+            ty.bits(arch) == 64,
+            arch.arg_at(syscall.spec_signature(arch), self.arg as nat, slot as nat),
             slot < Rule::ARG_COUNT_MAX,
-            _sig@[self.arg as int].bits(arch) == 64,
-            (arch == Arch::X86 || arch == Arch::Arm) ==> slot + 1 < Rule::ARG_COUNT_MAX,
-            signed_order == (_sig@[self.arg as int].signed() &&
-                (self.op is Lt || self.op is Le || self.op is Gt || self.op is Ge)),
+            arch.splits(ty) ==> slot + 1 < Rule::ARG_COUNT_MAX,
             0 < fail <= b.rev@.len(),
             b.wf(),
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
             res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.eval(arch, _syscall, Event::of(data).args) ==>
+                && self.eval(arch, syscall, Event::of(data).args) ==>
                 #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
                     a, old(b).rev@.len()),
             res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.eval(arch, _syscall, Event::of(data).args) ==>
+                && !self.eval(arch, syscall, Event::of(data).args) ==>
                 #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
                     a, fail as nat),
     {
         let pass = b.label();
         let lo = Policy::OFFSET_EVENT_ARGS + 8 * slot;
-        let hi = if arch.is_64bit() { lo + 4 } else { lo + 8 };
+        let hi = if arch.exec_splits(ty) { lo + 8 } else { lo + 4 };
         let masked = self.op == Compare::MaskedEq;
         let order = self.op == Compare::Lt || self.op == Compare::Le
             || self.op == Compare::Gt || self.op == Compare::Ge;
         let below = self.op == Compare::Ne || self.op == Compare::Lt || self.op == Compare::Le;
-        let neq = if below { pass } else { fail };
-        let gt = if below { fail } else { pass };
-        let bias: u32 = if signed_order { 0x8000_0000 } else { 0 };
-        let a_lo = self.a as u32;
+        let bias: u32 = if ty.exec_signed() && order { 0x8000_0000 } else { 0 };
         let a_hi = (self.a >> 32) as u32;
-        let k_lo = if masked { self.b as u32 } else { a_lo };
-        let k_hi = if masked { (self.b >> 32) as u32 } else { a_hi ^ bias };
-        let (jmp, expect) = self.op.fail_jump();
-        b.emit_jump(jmp, Src::K(k_lo), expect, fail)?;
-        let ghost s1 = b.rev@;
-        if masked {
-            b.emit(Instr::Alu(AluOp::And, Src::K(a_lo)));
-        }
-        let ghost s2 = b.rev@;
-        b.emit(Instr::LdAbs(lo));
-        let ghost s3 = b.rev@;
-        b.emit_jump(JmpOp::Eq, Src::K(k_hi), false, neq)?;
-        let ghost s4 = b.rev@;
+        let (mask_lo, k_lo) = if masked { (self.a as u32, self.b as u32) } else { (u32::MAX, self.a as u32) };
+        let (mask_hi, k_hi) = if masked { (a_hi, (self.b >> 32) as u32) } else { (u32::MAX, a_hi ^ bias) };
+        self.op.emit_test(b, lo, mask_lo, 0, k_lo, fail)?;
+        let ghost r_lo = b.rev@;
+        b.emit_jump(JmpOp::Eq, Src::K(k_hi), false, if below { pass } else { fail })?;
+        let ghost r_ne = b.rev@;
         if order {
-            b.emit_jump(JmpOp::Gt, Src::K(k_hi), true, gt)?;
+            b.emit_jump(JmpOp::Gt, Src::K(k_hi), true, if below { fail } else { pass })?;
         }
-        let ghost s5 = b.rev@;
-        if masked {
-            b.emit(Instr::Alu(AluOp::And, Src::K(a_hi)));
-        }
-        let ghost r_branch = b.rev@;
+        let ghost r_gt = b.rev@;
+        b.emit_load(hi, mask_hi, bias);
         proof {
-            assert(neq as nat == self.high_neq_target(pass as nat, fail as nat));
-            assert(order ==> gt as nat == self.high_gt_target(pass as nat, fail as nat));
-            self.lemma_branch(s1, s2, s3, s4, s5, r_branch, lo, bias, k_lo, k_hi,
-                pass as nat, fail as nat);
-        }
-        if signed_order {
-            b.emit(Instr::Alu(AluOp::Xor, Src::K(bias)));
-        }
-        let ghost r_xor = b.rev@;
-        b.emit(Instr::LdAbs(hi));
-        proof {
-            assert forall |data: &[u8], incoming: u32| Event::parse(data) is Some implies
-                #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)) by {
-                let ev = Event::of(data);
+            assert forall |data: &[u8]| #[trigger] Event::parse(data) is Some implies {
+                let hm = (Builder::word(data, hi) & mask_hi) ^ bias;
+                &&& self.eval(arch, syscall, Event::of(data).args) ==>
+                    Builder::lands(r_gt, data, r_gt.len(), hm, pass as nat)
+                &&& !self.eval(arch, syscall, Event::of(data).args) ==>
+                    Builder::lands(r_gt, data, r_gt.len(), hm, fail as nat)
+            } by {
+                let args = Event::of(data).args;
                 Event::lemma_image(data);
-                self.lemma_wide_truth(arch, _syscall, _sig@, ev.args, slot);
-                let low = Builder::word(data, lo);
-                let high = Builder::word(data, hi);
-                assert(low == (ev.args[slot as int] & 0xFFFF_FFFF) as u32);
-                if arch == Arch::X86_64 || arch == Arch::Aarch64 {
-                    assert(high == (ev.args[slot as int] >> 32) as u32);
+                let x = arch.raw(args, ty, slot as nat);
+                assert(arch.interp_args(args, syscall.spec_signature(arch))[self.arg as int]
+                    == ty.cast(arch, x));
+                arch.lemma_raw_words(args, ty, slot as nat);
+                let l = Builder::word(data, lo);
+                let h = Builder::word(data, hi);
+                let lv = args[slot as int];
+                assert((lv & 0xFFFF_FFFF) as u32 == lv as u32) by (bit_vector);
+                if arch.splits(ty) {
+                    let hv = args[slot + 1 as int];
+                    assert((hv & 0xFFFF_FFFF) as u32 == hv as u32) by (bit_vector);
+                    assert(h == hv as u32);
                 } else {
-                    assert(high == (ev.args[(slot + 1) as int] & 0xFFFF_FFFF) as u32);
+                    assert(h == (lv >> 32) as u32);
                 }
-                arch.lemma_physical_words(ev.args, _sig@, self.arg as nat,
-                    slot as nat, low, high);
-                let x = arch.physical_value(ev.args, _sig@, self.arg as nat, 0);
-                let ty = _sig@[self.arg as int];
-                let tested_high = high ^ bias;
-                let target = self.word_target(arch, _syscall, ev.args,
-                    pass as nat, fail as nat);
-                let branch_target = self.wide_target(low, tested_high, bias,
-                    pass as nat, fail as nat);
-                assert(self.eval(arch, _syscall, ev.args)
-                    == self.wide_test(arch, ty, low, high));
-                assert(branch_target == target);
-                assert(Builder::lands(r_branch, data, r_branch.len(),
-                    tested_high, target));
-                if signed_order {
-                    Builder::lemma_alu(r_xor, AluOp::Xor, bias);
-                    assert(Builder::goes_to(r_xor, data, r_xor.len(), high,
-                        r_branch.len(), tested_high));
-                    Self::lemma_step(r_branch, r_xor, data, high,
-                        r_branch.len(), tested_high, target);
-                } else {
-                    assert(r_xor == r_branch);
-                    assert((high ^ 0u32) == high) by (bit_vector);
+                assert(l == x as u32);
+                assert(h == (x >> 32) as u32);
+                self.lemma_wide_truth(arch, syscall, x, mask_hi, mask_lo, bias, k_hi, k_lo);
+                let hm = (h & mask_hi) ^ bias;
+                assert(((l & mask_lo) ^ 0u32) == l & mask_lo) by (bit_vector);
+                let to = if self.eval(arch, syscall, args) { pass as nat } else { fail as nat };
+                if hm == k_hi {
+                    assert(Builder::lands(r_lo, data, r_lo.len(), hm, to));
                 }
-                assert(hi + 4 <= data@.len());
-                Self::lemma_load(r_xor, b.rev@, data, hi, incoming, target);
-            }
-            assert forall |data: &[u8], incoming: u32|
-                Event::parse(data) is Some
-                    && self.eval(arch, _syscall, Event::of(data).args)
-                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(),
-                    incoming, pass as nat) by {
-                assert(Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)));
-            }
-            assert forall |data: &[u8], incoming: u32|
-                Event::parse(data) is Some
-                    && !self.eval(arch, _syscall, Event::of(data).args)
-                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(),
-                    incoming, fail as nat) by {
-                assert(Builder::lands(b.rev@, data, b.rev@.len(), incoming,
-                    self.word_target(arch, _syscall, Event::of(data).args,
-                        pass as nat, fail as nat)));
+                if !(order && hm > k_hi) {
+                    assert(Builder::lands(r_ne, data, r_ne.len(), hm, to));
+                }
+                assert(Builder::lands(r_gt, data, r_gt.len(), hm, to));
             }
         }
         Ok(())
@@ -1399,81 +881,39 @@ impl Rule {
 
         if let Some(arg) = self.mux_arg(arch) {
             if self.mux_nr(arch) == Some(nr) {
+                let mask: u32 = if self.syscall.ipc_arg().is_some() { 0xFFFF } else { u32::MAX };
                 b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
                 let ghost r_sel = b.rev@;
-                let is_ipc = self.syscall.ipc_arg().is_some();
-                if is_ipc {
-                    b.emit(Instr::Alu(AluOp::And, Src::K(0xFFFF)));
-                }
-                let ghost r_mask = b.rev@;
-                let ghost r_arg = r_mask.push(Instr::LdAbs(Policy::OFFSET_EVENT_ARGS));
+                b.emit_load(Policy::OFFSET_EVENT_ARGS, mask, 0);
                 proof {
-                    Builder::lemma_ld(r_arg, Policy::OFFSET_EVENT_ARGS);
                     assert forall |data: &[u8], a: u32|
-                        Event::parse(data) is Some
-                        && self.body_holds(arch, nr, Event::of(data))
-                        implies #[trigger] Builder::returns(r_arg, data, r_arg.len(), a,
-                            self.action.to_ret()) by {
+                        #![trigger Builder::returns(b.rev@, data, b.rev@.len(), a, self.action.to_ret())]
+                        #![trigger Builder::lands(b.rev@, data, b.rev@.len(), a, base.len())]
+                        Event::parse(data) is Some implies
+                        if self.body_holds(arch, nr, Event::of(data)) {
+                            Builder::returns(b.rev@, data, b.rev@.len(), a, self.action.to_ret())
+                        } else {
+                            Builder::lands(b.rev@, data, b.rev@.len(), a, base.len())
+                        } by {
+                        let arg0 = Event::of(data).args[0];
+                        let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
                         Event::lemma_image(data);
                         assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
-                            == (Event::of(data).args[0] & 0xFFFF_FFFF) as u32);
-                        let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
-                        let selector = if is_ipc { w & 0xFFFF } else { w };
-                        Self::lemma_ipc_selector(Event::of(data).args[0]);
-                        assert(selector == arg);
-                        assert(Builder::goes_to_all(r_arg, data, r_arg.len(),
-                            (r_arg.len() - 1) as nat, w));
-                        assert(Builder::goes_to(r_arg, data, r_arg.len(), a, r_mask.len(), w));
-                        assert(Builder::goes_to(r_sel, data, r_sel.len(), selector,
-                            r_ret.len(), selector));
-                        Builder::lemma_then(r_ret, r_sel, data, r_sel.len(), selector,
-                            r_ret.len(), selector,
-                            0, self.action.to_ret());
-                        if is_ipc {
-                            Builder::lemma_alu(r_mask, AluOp::And, 0xFFFF);
-                            assert(Builder::goes_to(r_mask, data, r_mask.len(), w,
-                                r_sel.len(), selector));
-                            Builder::lemma_then(r_sel, r_mask, data, r_mask.len(), w,
-                                r_sel.len(), selector, 0, self.action.to_ret());
-                        } else {
-                            assert(r_mask == r_sel);
+                            == (arg0 & 0xFFFF_FFFF) as u32);
+                        Self::lemma_ipc_selector(arg0);
+                        assert((w & u32::MAX) ^ 0u32 == w) by (bit_vector);
+                        assert((w & 0xFFFF) ^ 0u32 == w & 0xFFFF) by (bit_vector);
+                        let sel = (w & mask) ^ 0;
+                        assert(self.body_holds(arch, nr, Event::of(data)) <==> sel == arg);
+                        if self.body_holds(arch, nr, Event::of(data)) {
+                            assert(Builder::goes_to(r_ret, data, r_ret.len(), sel, r_ret.len(), sel));
+                            assert(Builder::lands(r_sel, data, r_sel.len(), sel, r_ret.len()));
+                            assert(Builder::lands(b.rev@, data, b.rev@.len(), a, r_ret.len()));
+                            Builder::lemma_then_any(r_ret, b.rev@, data, b.rev@.len(), a,
+                                r_ret.len(), 0, self.action.to_ret());
                         }
-                        Builder::lemma_then(r_mask, r_arg, data, r_arg.len(), a, r_mask.len(), w,
-                            0, self.action.to_ret());
-                    }
-                    assert forall |data: &[u8], a: u32|
-                        Event::parse(data) is Some
-                        && !self.body_holds(arch, nr, Event::of(data))
-                        implies #[trigger] Builder::lands(r_arg, data, r_arg.len(), a,
-                            base.len()) by {
-                        Event::lemma_image(data);
-                        assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
-                            == (Event::of(data).args[0] & 0xFFFF_FFFF) as u32);
-                        let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
-                        let selector = if is_ipc { w & 0xFFFF } else { w };
-                        Self::lemma_ipc_selector(Event::of(data).args[0]);
-                        assert(selector != arg);
-                        assert(Builder::goes_to_all(r_arg, data, r_arg.len(),
-                            (r_arg.len() - 1) as nat, w));
-                        assert(Builder::goes_to(r_arg, data, r_arg.len(), a, r_mask.len(), w));
-                        assert(Builder::goes_to(r_sel, data, r_sel.len(), selector,
-                            end as nat, selector));
-                        assert(Builder::lands(r_sel, data, r_sel.len(), selector, end as nat));
-                        if is_ipc {
-                            Builder::lemma_alu(r_mask, AluOp::And, 0xFFFF);
-                            assert(Builder::goes_to(r_mask, data, r_mask.len(), w,
-                                r_sel.len(), selector));
-                            Builder::lemma_then(r_sel, r_mask, data, r_mask.len(), w,
-                                r_sel.len(), selector, end as nat, w);
-                        } else {
-                            assert(r_mask == r_sel);
-                        }
-                        assert(Builder::lands(r_mask, data, r_mask.len(), w, end as nat));
-                        Builder::lemma_then(r_mask, r_arg, data, r_arg.len(), a, r_mask.len(), w,
-                            end as nat, w);
                     }
                 }
-                b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_ARGS));
                 return Ok(());
             }
         }
@@ -1502,7 +942,7 @@ impl Rule {
         {
             let ghost r_prev = b.rev@;
             i -= 1;
-            self.conds[i].emit(b, arch, self.syscall, sig, end)?;
+            self.conds[i].emit(b, arch, Ghost(self.syscall), sig, end)?;
             let ghost r_cond = b.rev@;
             proof {
                 assert forall |data: &[u8], a: u32|
@@ -1573,21 +1013,17 @@ impl Rule {
 
     /// The number of the x86 multiplexer that also reaches this rule, if one does.
     pub(super) open spec fn spec_mux_nr(&self, arch: Arch) -> Option<u32> {
-        if arch != Arch::X86 || self.no_mux {
+        if arch != Arch::X86 || self.no_mux
+            || self.syscall.to_socketcall_arg() is None && self.syscall.to_ipc_arg() is None {
             None
         } else {
             let mux = if self.syscall.to_socketcall_arg() is Some {
-                Some(Syscall::Socketcall)
-            } else if self.syscall.to_ipc_arg() is Some {
-                Some(Syscall::Ipc)
+                Syscall::Socketcall
             } else {
-                None
+                Syscall::Ipc
             };
-            match mux {
-                Some(name) => match name.spec_nr(arch) {
-                    Some(nr) => Some(nr as u32),
-                    None => None,
-                },
+            match mux.spec_nr(arch) {
+                Some(nr) => Some(nr as u32),
                 None => None,
             }
         }
@@ -1598,23 +1034,19 @@ impl Rule {
     pub(super) fn mux_nr(&self, arch: Arch) -> (res: Option<u32>)
         ensures res == self.spec_mux_nr(arch)
     {
-        // Exact rules do not emit a multiplexed match.
         if arch != Arch::X86 || self.no_mux {
             return None;
         }
         let mux = if self.syscall.socketcall_arg().is_some() {
-            Some(Syscall::Socketcall)
+            Syscall::Socketcall
         } else if self.syscall.ipc_arg().is_some() {
-            Some(Syscall::Ipc)
+            Syscall::Ipc
         } else {
-            None
+            return None;
         };
-        match mux {
-            Some(name) => name.nr(arch).map(|nr: i32| -> (res: u32)
-                ensures res == nr as u32
-            { nr as u32 }),
-            None => None,
-        }
+        mux.nr(arch).map(|nr: i32| -> (res: u32)
+            ensures res == nr as u32
+        { nr as u32 })
     }
 }
 

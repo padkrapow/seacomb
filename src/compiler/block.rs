@@ -137,6 +137,40 @@ impl Arch {
     }
 }
 
+impl Action {
+    /// Executable version of [`Action::precedence`].
+    pub(super) fn priority(&self) -> (res: u8)
+        ensures res == self.precedence()
+    {
+        match self {
+            Action::KillProcess => 7,
+            Action::KillThread => 6,
+            Action::Trap(_) => 5,
+            Action::Errno(_) => 4,
+            Action::Notify => 3,
+            Action::Trace(_) => 2,
+            Action::Log => 1,
+            Action::Allow => 0,
+        }
+    }
+
+    /// Executable version of [`Action::to_ret`].
+    pub(super) fn exec_to_ret(&self) -> (res: u32)
+        ensures res == self.to_ret()
+    {
+        match self {
+            Action::KillProcess => Self::RET_KILL_PROCESS,
+            Action::KillThread => Self::RET_KILL_THREAD,
+            Action::Trap(data) => Self::RET_TRAP | *data as u32,
+            Action::Errno(data) => Self::RET_ERRNO | *data as u32,
+            Action::Trace(data) => Self::RET_TRACE | *data as u32,
+            Action::Log => Self::RET_LOG,
+            Action::Allow => Self::RET_ALLOW,
+            Action::Notify => Self::RET_USER_NOTIF,
+        }
+    }
+}
+
 impl Policy {
     /// Emits the rules and default return for an architecture token.
     ///
