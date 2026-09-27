@@ -32,8 +32,7 @@ pub enum Action {
 pub struct Rule {
     pub action: Action,
     pub syscall: Syscall,
-    /// Rule condition is a single expression of type [`U(1)`].
-    pub cond: Option<Arc<Expr>>,
+    pub cond: Arc<Cond>,
     /// Prevents multiplexing syscalls. For example, a rule for `bind`
     /// should not match `socketcall(2, ...)`.
     pub no_mux: bool,
@@ -87,19 +86,18 @@ impl Rule {
     /// Well-formedness of a rule, relative to all supported architectures.
     pub open spec fn wf(self, archs: Seq<Arch>) -> bool {
         &&& self.action.wf()
-        &&& self.cond matches Some(cond) ==>
-                forall |i: int| 0 <= i < archs.len() ==>
-                    cond.of_type(#[trigger] archs[i], self.syscall.spec_signature(archs[i]), PrimType::U(1))
+        &&& forall |i: int| 0 <= i < archs.len() ==>
+                self.cond.wf(#[trigger] archs[i], self.syscall.spec_signature(archs[i]))
         // When allowing mux, the rule should not have any conditions
         // since the multiplexed call may have different argument positions.
         // TODO: Ideally, we should only check this if x86 is enabled
-        &&& !self.no_mux && self.syscall.can_mux() ==> self.cond is None
+        &&& !self.no_mux && self.syscall.can_mux() ==> *self.cond == Cond::True
         // If a rule's syscall differ in signature on two different supported architectures,
         // it must not impose a condition on the argument.
         &&& forall |i: int, j: int| #![trigger archs[i], archs[j]]
                 0 <= i < j < archs.len() &&
                 self.syscall.spec_signature(archs[i]) != self.syscall.spec_signature(archs[j])
-                ==> self.cond is None
+                ==> *self.cond == Cond::True
     }
 }
 
@@ -250,9 +248,9 @@ impl Rule {
     pub open spec fn eval(self, arch: Arch, ev: Event) -> bool {
         let sig = self.syscall.spec_signature(arch);
         ||| self.syscall.nr(arch) == Some(ev.nr) &&
-            (self.cond matches Some(cond) ==> cond.eval(arch, sig, arch.interp_args(ev.args, sig)) != 0)
+            self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
         // Matching against multiplexed `socketcall` or `ipc` on x86.
-        // NOTE: `Rule::wf` already enforces `self.cond is None` if `!self.no_mux`
+        // NOTE: `Rule::wf` already enforces `*self.cond == Cond::True` if `!self.no_mux`
         ||| !self.no_mux && arch == Arch::X86 && {
             ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
                 && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)

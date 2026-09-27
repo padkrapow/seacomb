@@ -18,15 +18,9 @@ pub enum PrimType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum CmpOp { Eq, Lt, Le }
+pub enum BinOp { Add, Sub, And, Or, Xor }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum ArithOp { Add, Sub, Mul }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum BitwiseOp { And, Or, Xor }
-
-/// A simple expression language to describe rule constraints.
+/// Arithmetic expressions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     /// A free variable.
@@ -35,12 +29,21 @@ pub enum Expr {
     Lit(i64, PrimType),
     /// Explicit casting.
     Cast(Arc<Expr>, PrimType),
-    /// Comparison ops.
+    /// Arithmetic/bitwise binary ops.
+    BinOp(BinOp, Arc<Expr>, Arc<Expr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
+pub enum CmpOp { Eq, Lt, Le }
+
+/// Boolean conditions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cond {
+    True, False,
     Cmp(CmpOp, Arc<Expr>, Arc<Expr>),
-    /// Arithmetic ops.
-    Arith(ArithOp, Arc<Expr>, Arc<Expr>),
-    /// Nitwise ops.
-    Bitwise(BitwiseOp, Arc<Expr>, Arc<Expr>),
+    And(Arc<Cond>, Arc<Cond>),
+    Or(Arc<Cond>, Arc<Cond>),
+    Not(Arc<Cond>),
 }
 
 impl Arch {
@@ -112,33 +115,43 @@ impl Expr {
             Expr::Var(i) => i < ctx.len() && ty == ctx[i as int],
             Expr::Lit(c, cty) => ty == cty,
             Expr::Cast(e, cty) => ty == cty && exists |ety: PrimType| e.of_type(arch, ctx, ety),
-            Expr::Cmp(op, e1, e2) => exists |ty1: PrimType, ty2: PrimType| {
+            Expr::BinOp(op, e1, e2) => exists |ty1: PrimType, ty2: PrimType| {
+                &&& e1.of_type(arch, ctx, ty1)
+                &&& e2.of_type(arch, ctx, ty2)
+                &&& ty1 != PrimType::Ptr
+                &&& ty2 != PrimType::Ptr
+                &&& match op {
+                    // Implicit casting, and the result is the "larger" type.
+                    BinOp::Add | BinOp::Sub => {
+                        ||| ty1.subtype_of(arch, ty2) && ty == ty2
+                        ||| ty2.subtype_of(arch, ty1) && ty == ty1
+                    },
+                    // No implicit casting in bitwise ops.
+                    _ => ty1 == ty2 && ty == ty1,
+                }
+            },
+        }
+    }
+}
+
+impl Cond {
+    /// Whether the condition is well-typed.
+    pub open spec fn wf(self, arch: Arch, ctx: Seq<PrimType>) -> bool
+        decreases self
+    {
+        match self {
+            Cond::True | Cond::False => true,
+            Cond::Cmp(op, e1, e2) => exists |ty1: PrimType, ty2: PrimType| {
                 &&& e1.of_type(arch, ctx, ty1)
                 &&& e2.of_type(arch, ctx, ty2)
                 &&& ty1 == PrimType::Ptr ==> op == CmpOp::Eq
                 &&& ty2 == PrimType::Ptr ==> op == CmpOp::Eq
                 // Implicit casting
                 &&& ty1.subtype_of(arch, ty2) || ty2.subtype_of(arch, ty1)
-                &&& ty == PrimType::U(1)
             },
-            Expr::Arith(op, e1, e2) => exists |ty1: PrimType, ty2: PrimType| {
-                &&& e1.of_type(arch, ctx, ty1)
-                &&& e2.of_type(arch, ctx, ty2)
-                &&& ty1 != PrimType::Ptr
-                &&& ty2 != PrimType::Ptr
-                &&& {
-                    // Implicit casting, and the result is the "larger" type.
-                    ||| ty1.subtype_of(arch, ty2) && ty == ty2
-                    ||| ty2.subtype_of(arch, ty1) && ty == ty1
-                }
-            },
-            Expr::Bitwise(op, e1, e2) => exists |ety: PrimType| {
-                // No implicit casting in bitwise ops.
-                &&& e1.of_type(arch, ctx, ety)
-                &&& e2.of_type(arch, ctx, ety)
-                &&& ety != PrimType::Ptr
-                &&& ty == ety
-            },
+            Cond::And(c1, c2) => c1.wf(arch, ctx) && c2.wf(arch, ctx),
+            Cond::Or(c1, c2) => c1.wf(arch, ctx) && c2.wf(arch, ctx),
+            Cond::Not(c) => c.wf(arch, ctx),
         }
     }
 }
@@ -157,39 +170,42 @@ impl Expr {
             Expr::Var(i) => ctx[i as int].to_int(arch, args[i as int]),
             Expr::Lit(c, cty) => cty.trunc(arch, c as int),
             Expr::Cast(e, cty) => cty.trunc(arch, e.eval(arch, ctx, args)),
-            Expr::Cmp(op, e1, e2) => {
+            Expr::BinOp(op, e1, e2) => {
+                let ty = choose |ty: PrimType| self.of_type(arch, ctx, ty);
                 let v1 = e1.eval(arch, ctx, args);
                 let v2 = e2.eval(arch, ctx, args);
-                let holds = match op {
+                match op {
+                    BinOp::Add => ty.trunc(arch, v1 + v2),
+                    BinOp::Sub => ty.trunc(arch, v1 - v2),
+                    BinOp::And => ty.to_int(arch, ty.to_bits(arch, v1) & ty.to_bits(arch, v2)),
+                    BinOp::Or => ty.to_int(arch, ty.to_bits(arch, v1) | ty.to_bits(arch, v2)),
+                    BinOp::Xor => ty.to_int(arch, ty.to_bits(arch, v1) ^ ty.to_bits(arch, v2)),
+                }
+            }
+        }
+    }
+}
+
+impl Cond {
+    /// Whether the condition holds.
+    pub open spec fn eval(self, arch: Arch, ctx: Seq<PrimType>, args: Seq<u64>) -> bool
+        decreases self
+    {
+        match self {
+            Cond::True => true,
+            Cond::False => false,
+            Cond::Cmp(op, e1, e2) => {
+                let v1 = e1.eval(arch, ctx, args);
+                let v2 = e2.eval(arch, ctx, args);
+                match op {
                     CmpOp::Eq => v1 == v2,
                     CmpOp::Lt => v1 < v2,
                     CmpOp::Le => v1 <= v2,
-                };
-                if holds { 1 } else { 0 }
+                }
             }
-            // Wraps around at the result type.
-            Expr::Arith(op, e1, e2) => {
-                let ty = choose |ty: PrimType| self.of_type(arch, ctx, ty);
-                let v1 = e1.eval(arch, ctx, args);
-                let v2 = e2.eval(arch, ctx, args);
-                let v = match op {
-                    ArithOp::Add => v1 + v2,
-                    ArithOp::Sub => v1 - v2,
-                    ArithOp::Mul => v1 * v2,
-                };
-                ty.trunc(arch, v)
-            }
-            Expr::Bitwise(op, e1, e2) => {
-                let ty = choose |ty: PrimType| self.of_type(arch, ctx, ty);
-                let v1 = ty.to_bits(arch, e1.eval(arch, ctx, args));
-                let v2 = ty.to_bits(arch, e2.eval(arch, ctx, args));
-                let v = match op {
-                    BitwiseOp::And => v1 & v2,
-                    BitwiseOp::Or => v1 | v2,
-                    BitwiseOp::Xor => v1 ^ v2,
-                };
-                ty.to_int(arch, v)
-            }
+            Cond::And(c1, c2) => c1.eval(arch, ctx, args) && c2.eval(arch, ctx, args),
+            Cond::Or(c1, c2) => c1.eval(arch, ctx, args) || c2.eval(arch, ctx, args),
+            Cond::Not(c) => !c.eval(arch, ctx, args),
         }
     }
 }
