@@ -76,11 +76,11 @@ impl Action {
         }
     }
 
-    /// Higher-precedence actions override lower  ones.
+    /// Higher-precedence actions override lower ones.
     /// This behavior is similar to when we install multiple filters:
     /// <https://docs.kernel.org/userspace-api/seccomp_filter.html#return-values>.
-    /// 
-    /// NOTE that, e.g., `Errno(1)` and `Error(2)` are not ordered.
+    ///
+    /// NOTE that, e.g., `Errno(1)` and `Errno(2)` are not ordered.
     pub open spec fn precedence(self) -> nat {
         match self {
             Action::KillProcess => 7,
@@ -199,15 +199,6 @@ pub struct Event {
     pub args: Seq<u64>,
 }
 
-/// Results of matching a syscall name against an event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum SyscallMatch {
-    Exact,
-    /// Matches a `socketcall` or `ipc` call.
-    Mux,
-    None,
-}
-
 impl Arch {
     // `AUDIT_ARCH_*` in `linux/audit.h`.
     pub const TOKEN_X86: u32 = 0x4000_0003;
@@ -272,24 +263,6 @@ impl Arch {
 }
 
 impl Event {
-    /// Whether the syscall name matches the event and if it is an exact match or a multiplexed match.
-    pub open spec fn matches_syscall(self, arch: Arch, name: Syscall) -> SyscallMatch {
-        if name.nr(arch) == Some(self.nr) {
-            SyscallMatch::Exact
-        } else if arch == Arch::X86 && {
-            // Matching against multiplexed `socketcall` or `ipc` on x86.
-            ||| Syscall::Socketcall.nr(arch) == Some(self.nr)
-                && name.to_socketcall_arg() == Some(self.args[0] & 0xFFFF_FFFF)
-            ||| Syscall::Ipc.nr(arch) == Some(self.nr)
-                // The kernel dispatches on the low 16 bits of the call number.
-                && name.to_ipc_arg() == Some(self.args[0] & 0xFFFF)
-        } {
-            SyscallMatch::Mux
-        } else {
-            SyscallMatch::None
-        }
-    }
-
     /// Parses a (little-endian) `seccomp_data` from the kernel into an `Event`.
     pub open spec fn parse(data: &[u8]) -> Option<Event> {
         if data@.len() != 64 {
@@ -367,11 +340,15 @@ impl Rule {
     pub open spec fn eval(self, arch: Arch, ev: Event) -> bool {
         let conds_hold = forall |i: int| #![trigger self.conds@[i]]
             0 <= i < self.conds@.len() ==> self.conds@[i].eval(arch, self.syscall, ev.args);
-        match ev.matches_syscall(arch, self.syscall) {
-            SyscallMatch::Exact => conds_hold,
-            // NOTE: `Rule::wf` already enforces `self.conds@.len() == 0` if `!self.no_mux`
-            SyscallMatch::Mux => !self.no_mux,
-            SyscallMatch::None => false,
+        ||| self.syscall.nr(arch) == Some(ev.nr) && conds_hold
+        // Matching against multiplexed `socketcall` or `ipc` on x86.
+        // NOTE: `Rule::wf` already enforces `self.conds@.len() == 0` if `!self.no_mux`
+        ||| !self.no_mux && arch == Arch::X86 && {
+            ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
+                && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)
+            ||| Syscall::Ipc.nr(arch) == Some(ev.nr)
+                // The kernel dispatches on the low 16 bits of the call number.
+                && self.syscall.to_ipc_arg() == Some(ev.args[0] & 0xFFFF)
         }
     }
 }
