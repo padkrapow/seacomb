@@ -9,6 +9,11 @@ keywords = ["seccomp", "sandbox", "bpf", "verus", "formal-verification"]
 categories = ["os::linux-apis", "compilers"]
 rust-version = "1.98"
 exclude = [".github/", "tests/"]
+autotests = false
+
+[[test]]
+name = "tests"
+path = "tests/mod.rs"
 
 [dependencies]
 thiserror = "2"
