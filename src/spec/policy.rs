@@ -1,7 +1,9 @@
 //! Abstract syntax and semantics of the libseccomp policy language.
 
 use vstd::prelude::*;
+use std::sync::Arc;
 use super::syscall::*;
+use super::expr::*;
 
 // Syntax
 verus! {
@@ -23,21 +25,6 @@ pub enum Action {
     Notify,
 }
 
-/// Comparison operators `scmp_compare`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum Compare { Ne, Lt, Le, Eq, Ge, Gt, MaskedEq }
-
-/// Conditions on a particular syscall (virtual) argument.
-/// Similar to libseccomp's `scmp_arg_cmp`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub struct ArgCmp {
-    pub arg: u32,
-    pub op: Compare,
-    pub a: u64,
-    /// For MaskedEq only: `a` is the mask, `b` the value.
-    pub b: u64,
-}
-
 /// One policy rule
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
@@ -45,7 +32,8 @@ pub struct ArgCmp {
 pub struct Rule {
     pub action: Action,
     pub syscall: Syscall,
-    pub conds: Vec<ArgCmp>,
+    /// Rule condition is a single expression of type [`U(1)`].
+    pub cond: Option<Arc<Expr>>,
     /// Prevents multiplexing syscalls. For example, a rule for `bind`
     /// should not match `socketcall(2, ...)`.
     pub no_mux: bool,
@@ -95,82 +83,23 @@ impl Action {
     }
 }
 
-impl PrimType {
-    /// Bitwidth of the primitive type on the given arch.
-    pub open spec fn bits(self, arch: Arch) -> u64 {
-        match self {
-            PrimType::I(n) => n as u64,
-            PrimType::U(n) => n as u64,
-            _ => if arch == Arch::X86_64 || arch == Arch::Aarch64 {
-                64
-            } else {
-                32
-            }
-        }
-    }
-
-    pub open spec fn mask(self, arch: Arch) -> u64 {
-        if self.bits(arch) >= 64 { u64::MAX } else { ((1u64 << self.bits(arch)) - 1) as u64 }
-    }
-
-    pub open spec fn signed(self) -> bool {
-        self is I || self is IWord
-    }
-
-    /// Bitcasts `value` to this type, interpreted as an unbounded integer.
-    pub open spec fn cast(self, arch: Arch, value: u64) -> int {
-        let pattern = value & self.mask(arch);
-        if self.signed() && pattern > self.mask(arch) >> 1u64 {
-            pattern - (self.mask(arch) + 1)
-        } else {
-            pattern as int
-        }
-    }
-}
-
-impl ArgCmp {
-    /// Well-formedness of rule conditions.
-    pub open spec fn wf(self, arch: Arch, syscall: Syscall) -> bool {
-        let sig = syscall.spec_signature(arch);
-        let ty = sig[self.arg as int];
-        // Sign-bit and all bits above the mask set to 1.
-        let sign = !(ty.mask(arch) >> 1u64);
-
-        &&& self.arg < sig.len()
-        // Pointer arguments can only be used for equality checks.
-        &&& ty is Ptr ==> self.op is Eq || self.op is Ne || self.op is MaskedEq
-        // All constants are sign-extended and stored as u64, so we need to make sure that
-        // when they are bitcasted to the argument's type, there is no loss of data.
-        &&& match self.op {
-            // The mask fits the argument, and the value has no bits outside the mask.
-            Compare::MaskedEq => self.a & !ty.mask(arch) == 0 && self.b & !self.a == 0,
-            // The constant is a value of the argument's type (sign-extended if signed).
-            _ => if ty.signed() {
-                self.a & sign == 0 || self.a & sign == sign
-            } else {
-                self.a & !ty.mask(arch) == 0
-            },
-        }
-    }
-}
-
 impl Rule {
     /// Well-formedness of a rule, relative to all supported architectures.
     pub open spec fn wf(self, archs: Seq<Arch>) -> bool {
         &&& self.action.wf()
-        &&& forall |i: int, j: int| #![trigger self.conds@[i], archs[j]]
-                0 <= i < self.conds@.len() &&
-                0 <= j < archs.len() ==> self.conds@[i].wf(archs[j], self.syscall)
+        &&& self.cond matches Some(cond) ==>
+                forall |i: int| 0 <= i < archs.len() ==>
+                    cond.of_type(#[trigger] archs[i], self.syscall.spec_signature(archs[i]), PrimType::U(1))
         // When allowing mux, the rule should not have any conditions
         // since the multiplexed call may have different argument positions.
         // TODO: Ideally, we should only check this if x86 is enabled
-        &&& !self.no_mux && self.syscall.can_mux() ==> self.conds@.len() == 0
+        &&& !self.no_mux && self.syscall.can_mux() ==> self.cond is None
         // If a rule's syscall differ in signature on two different supported architectures,
         // it must not impose a condition on the argument.
         &&& forall |i: int, j: int| #![trigger archs[i], archs[j]]
                 0 <= i < j < archs.len() &&
                 self.syscall.spec_signature(archs[i]) != self.syscall.spec_signature(archs[j])
-                ==> self.conds@.len() == 0
+                ==> self.cond is None
     }
 }
 
@@ -217,12 +146,12 @@ impl Arch {
     }
 
     /// Default 64-bit ABIs: each argument takes one slot.
-    pub open spec fn interp_args_64bit(self, args: Seq<u64>, sig: Seq<PrimType>) -> Seq<int> {
-        Seq::new(sig.len(), |i: int| sig[i].cast(self, args[i]))
+    pub open spec fn interp_args_64bit(self, args: Seq<u64>, sig: Seq<PrimType>) -> Seq<u64> {
+        Seq::new(sig.len(), |i: int| args[i])
     }
 
     /// x86 ABI: 64-bit arguments take two slots while others take one.
-    pub open spec fn interp_args_x86(args: Seq<u64>, sig: Seq<PrimType>) -> Seq<int>
+    pub open spec fn interp_args_x86(args: Seq<u64>, sig: Seq<PrimType>) -> Seq<u64>
         decreases sig.len()
     {
         if sig.len() == 0 {
@@ -230,14 +159,14 @@ impl Arch {
         } else if sig[0].bits(Arch::X86) == 64 {
             let value = (args[0] & 0xFFFF_FFFFu64)
                       | (args[1] & 0xFFFF_FFFFu64) << 32u64;
-            seq![sig[0].cast(Arch::X86, value)] + Self::interp_args_x86(args.skip(2), sig.drop_first())
+            seq![value] + Self::interp_args_x86(args.skip(2), sig.drop_first())
         } else {
-            seq![sig[0].cast(Arch::X86, args[0])] + Self::interp_args_x86(args.drop_first(), sig.drop_first())
+            seq![args[0]] + Self::interp_args_x86(args.drop_first(), sig.drop_first())
         }
     }
 
     /// ARM EABI: like x86, but a 64-bit value is padded to an even slot.
-    pub open spec fn interp_args_arm(args: Seq<u64>, sig: Seq<PrimType>, slot: int) -> Seq<int>
+    pub open spec fn interp_args_arm(args: Seq<u64>, sig: Seq<PrimType>, slot: int) -> Seq<u64>
         decreases sig.len()
     {
         if sig.len() == 0 {
@@ -246,14 +175,14 @@ impl Arch {
             let slot = slot + slot % 2;
             let value = (args[slot] & 0xFFFF_FFFFu64)
                       | (args[slot + 1] & 0xFFFF_FFFFu64) << 32u64;
-            seq![sig[0].cast(Arch::Arm, value)] + Self::interp_args_arm(args, sig.drop_first(), slot + 2)
+            seq![value] + Self::interp_args_arm(args, sig.drop_first(), slot + 2)
         } else {
-            seq![sig[0].cast(Arch::Arm, args[slot])] + Self::interp_args_arm(args, sig.drop_first(), slot + 1)
+            seq![args[slot]] + Self::interp_args_arm(args, sig.drop_first(), slot + 1)
         }
     }
 
-    /// The arguments of a syscall with signature `sig`, as the kernel reads them from the raw `args`.
-    pub open spec fn interp_args(self, args: Seq<u64>, sig: Seq<PrimType>) -> Seq<int> {
+    /// The bits of each argument of a syscall with signature `sig`, as the kernel reads them from the raw `args`.
+    pub open spec fn interp_args(self, args: Seq<u64>, sig: Seq<PrimType>) -> Seq<u64> {
         match self {
             Arch::X86 => Self::interp_args_x86(args, sig),
             Arch::Arm => Self::interp_args_arm(args, sig, 0),
@@ -316,33 +245,14 @@ impl Action {
     }
 }
 
-impl ArgCmp {
-    pub open spec fn eval(self, arch: Arch, syscall: Syscall, args: Seq<u64>) -> bool {
-        let sig = syscall.spec_signature(arch);
-        let ty = sig[self.arg as int];
-        let x = arch.interp_args(args, sig)[self.arg as int];
-        let c = ty.cast(arch, self.a);
-        match self.op {
-            Compare::Eq => x == c,
-            Compare::Ne => x != c,
-            Compare::Lt => x < c,
-            Compare::Le => x <= c,
-            Compare::Ge => x >= c,
-            Compare::Gt => x > c,
-            // On the argument's bits, i.e. its value modulo `2^bits`.
-            Compare::MaskedEq => (x % (ty.mask(arch) + 1)) as u64 & self.a == self.b,
-        }
-    }
-}
-
 impl Rule {
     /// Whether this rule matches event `ev` on `arch`.
     pub open spec fn eval(self, arch: Arch, ev: Event) -> bool {
-        let conds_hold = forall |i: int| #![trigger self.conds@[i]]
-            0 <= i < self.conds@.len() ==> self.conds@[i].eval(arch, self.syscall, ev.args);
-        ||| self.syscall.nr(arch) == Some(ev.nr) && conds_hold
+        let sig = self.syscall.spec_signature(arch);
+        ||| self.syscall.nr(arch) == Some(ev.nr) &&
+            (self.cond matches Some(cond) ==> cond.eval(arch, sig, arch.interp_args(ev.args, sig)) != 0)
         // Matching against multiplexed `socketcall` or `ipc` on x86.
-        // NOTE: `Rule::wf` already enforces `self.conds@.len() == 0` if `!self.no_mux`
+        // NOTE: `Rule::wf` already enforces `self.cond is None` if `!self.no_mux`
         ||| !self.no_mux && arch == Arch::X86 && {
             ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
                 && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)

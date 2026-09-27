@@ -1,16 +1,7 @@
 use vstd::prelude::*;
+use super::expr::PrimType;
  
 verus! {
-
-/// C-level type of a syscall argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
-pub enum PrimType {
-    I(u32),
-    U(u32),
-    IWord,
-    UWord,
-    Ptr,
-}
 
 /// A helper macro to define the `Syscall` enum and its `Syscall::nr` and
 /// `Syscall::signature` functions.
