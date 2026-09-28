@@ -8,7 +8,6 @@ mod filter;
 
 use seacomb::*;
 use seacomb::PrimType::*;
-use seacomb::Expr::{Lit, Var};
 
 /// The result a syscall should come back with.
 #[derive(Debug, Clone, Copy)]

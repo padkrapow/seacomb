@@ -21,19 +21,19 @@ pub enum AluOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum JmpOp { Eq = 0x10, Gt = 0x20, Ge = 0x30, Set = 0x40 }
 
-/// `struct sock_filter`, restricted to the codes accepted by `seccomp_check_filter()`:
+/// `struct sock_filter`, restricted to instructions accepted by `seccomp_check_filter()`:
 /// <https://github.com/torvalds/linux/blob/40288c9206c17eb66a603262e06a58d300d0f279/kernel/seccomp.c#L286-L343>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum Instr {
-    /// `BPF_LD | BPF_W | BPF_ABS`: `A = *(u32 *)((char *)&seccomp_data + k)`.
+    /// `BPF_LD | BPF_W | BPF_ABS`: `A = *(u32 *)((char *)&data + k)`.
     LdAbs(u32),
-    /// `BPF_LD | BPF_W | BPF_LEN`: `A = sizeof(struct seccomp_data)`.
+    /// `BPF_LD | BPF_W | BPF_LEN`: `A = data.len()`.
     LdLen,
     /// `BPF_LD | BPF_IMM`: `A = k`.
     LdImm(u32),
     /// `BPF_LD | BPF_MEM`: `A = M[k]`.
     LdMem(u32),
-    /// `BPF_LDX | BPF_W | BPF_LEN`: `X = sizeof(struct seccomp_data)`.
+    /// `BPF_LDX | BPF_W | BPF_LEN`: `X = data.len()`.
     LdxLen,
     /// `BPF_LDX | BPF_IMM`: `X = k`.
     LdxImm(u32),

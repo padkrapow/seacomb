@@ -24,8 +24,7 @@ use std::io::Write;
 let mut filter = Filter::new_native(Action::Allow).unwrap();
 
 // Make write to stderr (fd 2) fail with EPERM.
-let stderr = Expr::Var(0).eq(Expr::Lit(2, PrimType::U(32)));
-filter.add_rule(Action::Errno(1), Syscall::Write, stderr).unwrap();
+filter.add_rule(Action::Errno(1), Syscall::Write, cond!({0} == 2 as u32)).unwrap();
 
 // Kill the process on execve.
 filter.add_rule(Action::KillProcess, Syscall::Execve, Cond::True).unwrap();
