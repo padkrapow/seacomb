@@ -135,32 +135,25 @@ impl Builder {
         Ok(())
     }
 
-    /// Puts a load of the word at `k`, masked with `mask` and flipped by `bias`, in front
-    /// of the program.
+    /// Puts a load of the word at `k`, masked with `mask`, in front of the program.
     ///
     /// ```text
     ///     ld  [k]
     ///     and #mask               ; mask != 0xffffffff
-    ///     xor #bias               ; bias != 0
     /// ```
-    pub(super) fn emit_load(&mut self, k: u32, mask: u32, bias: u32)
+    pub(super) fn emit_load(&mut self, k: u32, mask: u32)
         requires k % 4 == 0, self.wf()
         ensures
             Builder::extends(old(self).rev@, final(self).rev@),
             final(self).wf(),
             forall |data: &[u8], r: Regs| k + 4 <= data@.len() ==>
                 #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r,
-                    old(self).rev@.len(), Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }),
+                    old(self).rev@.len(), Regs { a: Builder::word(data, k) & mask, ..r }),
             forall |data: &[u8], r: Regs, to: nat| k + 4 <= data@.len()
                 && Builder::lands(old(self).rev@, data, old(self).rev@.len(),
-                    Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }, to)
+                    Regs { a: Builder::word(data, k) & mask, ..r }, to)
                 ==> #[trigger] Builder::lands(final(self).rev@, data, final(self).rev@.len(), r, to),
     {
-        let ghost r_xor = self.rev@;
-        if bias != 0 {
-            self.emit(Instr::Alu(AluOp::Xor, Src::K(bias)));
-            proof { Builder::lemma_alu(self.rev@, AluOp::Xor, bias); }
-        }
         let ghost r_and = self.rev@;
         if mask != u32::MAX {
             self.emit(Instr::Alu(AluOp::And, Src::K(mask)));
@@ -171,25 +164,21 @@ impl Builder {
         proof {
             Builder::lemma_ld(self.rev@, k);
             assert forall |data: &[u8], r: Regs| k + 4 <= data@.len() implies
-                #[trigger] Builder::goes(self.rev@, data, self.rev@.len(), r, r_xor.len(),
-                    Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }) by {
+                #[trigger] Builder::goes(self.rev@, data, self.rev@.len(), r, r_and.len(),
+                    Regs { a: Builder::word(data, k) & mask, ..r }) by {
                 let w = Builder::word(data, k);
-                let m = w & mask;
                 assert((w & u32::MAX) == w) by (bit_vector);
-                assert((m ^ 0u32) == m) by (bit_vector);
-                let (rw, rm, rb) = (Regs { a: w, ..r }, Regs { a: m, ..r }, Regs { a: m ^ bias, ..r });
-                assert(Builder::goes(r_and, data, r_and.len(), rm, r_xor.len(), rb));
+                let (rw, rm) = (Regs { a: w, ..r }, Regs { a: w & mask, ..r });
                 assert(Builder::goes(r_ld, data, r_ld.len(), rw, r_and.len(), rm));
-                Builder::lemma_goes_trans(r_and, r_ld, data, r_ld.len(), rw, r_and.len(), rm, r_xor.len(), rb);
                 assert(Builder::goes(self.rev@, data, self.rev@.len(), r, r_ld.len(), rw));
-                Builder::lemma_goes_trans(r_ld, self.rev@, data, self.rev@.len(), r, r_ld.len(), rw, r_xor.len(), rb);
+                Builder::lemma_goes_trans(r_ld, self.rev@, data, self.rev@.len(), r, r_ld.len(), rw, r_and.len(), rm);
             }
             assert forall |data: &[u8], r: Regs, to: nat| k + 4 <= data@.len()
-                && Builder::lands(r_xor, data, r_xor.len(), Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }, to)
+                && Builder::lands(r_and, data, r_and.len(), Regs { a: Builder::word(data, k) & mask, ..r }, to)
                 implies #[trigger] Builder::lands(self.rev@, data, self.rev@.len(), r, to) by {
-                let rb = Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r };
-                assert(Builder::goes(self.rev@, data, self.rev@.len(), r, r_xor.len(), rb));
-                Builder::lemma_then(r_xor, self.rev@, data, self.rev@.len(), r, r_xor.len(), rb, to, 0);
+                let rm = Regs { a: Builder::word(data, k) & mask, ..r };
+                assert(Builder::goes(self.rev@, data, self.rev@.len(), r, r_and.len(), rm));
+                Builder::lemma_then(r_and, self.rev@, data, self.rev@.len(), r, r_and.len(), rm, to, 0);
             }
         }
     }

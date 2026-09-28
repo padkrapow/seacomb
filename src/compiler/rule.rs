@@ -346,7 +346,7 @@ impl Rule {
         if let Some((arg, mask)) = sel {
             b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
             let ghost r_sel = b.rev@;
-            b.emit_load(Policy::OFFSET_EVENT_ARGS, mask, 0);
+            b.emit_load(Policy::OFFSET_EVENT_ARGS, mask);
             proof {
                 assert forall |data: &[u8], r: Regs|
                     #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
@@ -364,8 +364,7 @@ impl Rule {
                         == (arg0 & 0xFFFF_FFFF) as u32);
                     assert((arg0 & (mask as u64)) as u32 == ((arg0 & 0xFFFF_FFFF) as u32) & mask)
                         by (bit_vector);
-                    assert((w & mask) ^ 0u32 == w & mask) by (bit_vector);
-                    let got = Regs { a: (w & mask) ^ 0, ..r };
+                    let got = Regs { a: w & mask, ..r };
                     assert(self.body_holds(arch, sel, Event::of(data)) <==> got.a == arg);
                     let to = if got.a == arg { r_ret.len() } else { end as nat };
                     assert(Builder::goes(r_sel, data, r_sel.len(), got, to, got));
