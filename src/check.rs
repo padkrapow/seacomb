@@ -30,7 +30,7 @@ pub enum CheckError {
     #[error("syscall signatures differ across enabled architectures")]
     IncompatSigs,
     /// A multiplexed syscall rule cannot have argument conditions.
-    #[error("multiplexed syscall rule cannot have argument conditions; use add_rule_exact")]
+    #[error("multiplexed syscall rule cannot have argument conditions")]
     InvalidMuxConditions,
     /// The filter already includes this architecture.
     #[error("filter already includes this architecture")]

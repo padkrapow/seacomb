@@ -188,35 +188,39 @@ macro_rules! cond {
 /// Parses a rule into a `Rule`.
 #[macro_export]
 macro_rules! rule {
-    // rule   := action ['exact'] syscall '(' names ')' ['on' arch (',' arch)*] ['when' cond]
-    // action := allow | errno '(' rust-expr ')' | kill process | kill thread
-    (allow $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Allow] $($rest)*) };
-    (errno ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Errno($e)] $($rest)*) };
+    // rule    := action ['exact'] syscall '(' names ')' ['on' arch (',' arch)*] ['when' cond]
+    // action  := kill process | kill thread | trap '(' rust-expr ')' | errno '(' rust-expr ')'
+    //          | trace '(' rust-expr ')' | log | allow | notify | '{' rust-expr '}'
+    // syscall := ident | '{' rust-expr '}'
     (kill process $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::KillProcess] $($rest)*) };
     (kill thread $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::KillThread] $($rest)*) };
+    (trap ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Trap($e)] $($rest)*) };
+    (errno ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Errno($e)] $($rest)*) };
+    (trace ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Trace($e)] $($rest)*) };
+    (log $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Log] $($rest)*) };
+    (allow $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Allow] $($rest)*) };
+    (notify $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Notify] $($rest)*) };
+    ({ $a:expr } $($rest:tt)*) => { $crate::rule!(@exact [$a] $($rest)*) };
 
     // `exact` sets `no_mux`.
-    (@exact [$($act:tt)*] exact $name:ident ( $($names:tt)* ) $($rest:tt)*) =>
-        { $crate::rule!(@on [$($act)*] true $name [$($names)*] $($rest)*) };
-    (@exact [$($act:tt)*] $name:ident ( $($names:tt)* ) $($rest:tt)*) =>
-        { $crate::rule!(@on [$($act)*] false $name [$($names)*] $($rest)*) };
-    (@exact [$($act:tt)*] $($t:tt)*) =>
+    (@exact $act:tt exact $($rest:tt)*) => { $crate::rule!(@syscall $act true $($rest)*) };
+    (@exact $act:tt $($rest:tt)*) => { $crate::rule!(@syscall $act false $($rest)*) };
+
+    (@syscall $act:tt $exact:tt { $s:expr } ( $($names:tt)* ) $($rest:tt)*) =>
+        { $crate::rule!(@mk $act $exact [$s] [$($names)*] $($rest)*) };
+    (@syscall $act:tt $exact:tt $name:ident ( $($names:tt)* ) $($rest:tt)*) => {
+        $crate::rule!(@mk $act $exact [const {
+            match $crate::Syscall::lookup(stringify!($name)) {
+                Some(s) => s,
+                None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
+            }
+        }] [$($names)*] $($rest)*)
+    };
+    (@syscall $act:tt $exact:tt $($t:tt)*) =>
         { compile_error!(concat!("expected a syscall, found `", stringify!($($t)*), "`")) };
 
-    // An empty `on` leaves `archs` empty, and an empty `when` is `true`.
-    (@on $act:tt $exact:tt $name:ident $names:tt on $($arch:ident),+ when $($c:tt)+) =>
-        { $crate::rule!(@mk $act $exact $name $names [$($arch),+] [$($c)+]) };
-    (@on $act:tt $exact:tt $name:ident $names:tt on $($arch:ident),+) =>
-        { $crate::rule!(@mk $act $exact $name $names [$($arch),+] [true]) };
-    (@on $act:tt $exact:tt $name:ident $names:tt when $($c:tt)+) =>
-        { $crate::rule!(@mk $act $exact $name $names [] [$($c)+]) };
-    (@on $act:tt $exact:tt $name:ident $names:tt) =>
-        { $crate::rule!(@mk $act $exact $name $names [] [true]) };
-    (@on $act:tt $exact:tt $name:ident $names:tt $($t:tt)*) =>
-        { compile_error!(concat!("expected `on` or `when`, found `", stringify!($($t)*), "`")) };
-
     // Binds each name to the argument at its position, so `when` can refer to it.
-    (@mk [$($act:tt)*] $exact:tt $name:ident [$($arg:tt),* $(,)?] [$($arch:ident),*] [$($c:tt)*]) => {{
+    (@mk [$($act:tt)*] $exact:tt [$($sys:tt)*] [$($arg:tt),* $(,)?] $(on $($arch:tt),+)? $(when $($c:tt)+)?) => {{
         $( $crate::rule!(@name $arg); )*
         #[allow(unused_variables)]
         let [$($arg,)* ..] = [
@@ -225,37 +229,104 @@ macro_rules! rule {
         ];
         $crate::Rule {
             action: $($act)*,
-            syscall: const {
-                match $crate::Syscall::lookup(stringify!($name)) {
-                    Some(s) => s,
-                    None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
-                }
-            },
-            cond: $crate::cond!(@arc $($c)*),
-            archs: ::std::vec![$( $crate::rule!(@arch $arch) ),*],
+            syscall: $($sys)*,
+            cond: $crate::rule!(@cond $($($c)+)?),
+            archs: ::std::vec![$($( $crate::rule!(@arch $arch) ),+)?],
             no_mux: $exact,
         }
     }};
+
+    (@mk $act:tt $exact:tt $sys:tt $names:tt on $(when $($t:tt)*)?) => { compile_error!("`on` wants at least one arch") };
+    (@mk $act:tt $exact:tt $sys:tt $names:tt $(on $($arch:tt),+)? when) => { compile_error!("`when` wants a condition") };
+    (@mk $act:tt $exact:tt $sys:tt $names:tt $($t:tt)*) =>
+        { compile_error!(concat!("expected `on` or `when`, found `", stringify!($($t)*), "`")) };
+
+    // A rule without `when` always applies.
+    (@cond) => { ::std::sync::Arc::new($crate::Cond::True) };
+    (@cond $($c:tt)+) => { $crate::cond!(@arc $($c)+) };
 
     // name := ident | '_'
     (@name $x:ident) => {};
     (@name _) => {};
     (@name $x:tt) => { compile_error!(concat!("expected an argument name, found `", stringify!($x), "`")) };
 
-    // arch := x86 | x86_64 | arm | aarch64
+    // arch := x86 | x86_64 | arm | aarch64 | '{' rust-expr '}'
     (@arch x86) => { $crate::Arch::X86 };
     (@arch x86_64) => { $crate::Arch::X86_64 };
     (@arch arm) => { $crate::Arch::Arm };
     (@arch aarch64) => { $crate::Arch::Aarch64 };
-    (@arch $a:ident) => { compile_error!(concat!("unknown arch `", stringify!($a), "`")) };
+    (@arch { $a:expr }) => { $a };
+    (@arch $a:tt) => { compile_error!(concat!("unknown arch `", stringify!($a), "`")) };
 
     ($($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
 }
 
+/// Cases that `rule!` should reject.
+///
+/// ```compile_fail
+/// seacomb::rule!(allow raed(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(deny read(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(kill read(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(trap read(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow exact(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(1));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(a, b, c, d, e, f, g));
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) on mips);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) on);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) on x86,);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) when);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) on when);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) on x86 when);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) if fd == 0);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) when fd == 0 on x86);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) when bogus == 0);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(allow read(fd) when @x == 0);
+/// ```
+/// ```compile_fail
+/// seacomb::rule!(errno(70000) read(fd));
+/// ```
+#[cfg(doctest)]
+struct RuleMacroTests;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use crate::{Cond, Expr, PrimType};
+    use crate::{Action, Arch, Cond, Expr, PrimType, Syscall};
 
     #[test]
     fn literal_types() {
@@ -363,7 +434,7 @@ mod tests {
 
     #[test]
     fn embedded() {
-        let v = vec![7u8, 8u8];
+        let v = [7u8, 8u8];
         assert_eq!(format!("{:?}", expr!({1 + 1})), "Lit(2, I(32))");
         assert_eq!(format!("{:?}", expr!({v[1]} as u16)), "Cast(Lit(8, U(8)), U(16))");
         assert_eq!(format!("{:?}", expr!({v.len()})), "Lit(2, UWord)");
@@ -376,5 +447,94 @@ mod tests {
         assert_eq!(format!("{:?}", expr!(@0 + @1 + @2 + @3 + @4 + @5)),
             "BinOp(Add, BinOp(Add, BinOp(Add, BinOp(Add, BinOp(Add, Var(0), Var(1)), Var(2)), Var(3)), Var(4)), Var(5))");
         assert_eq!(format!("{:?}", expr!(@3 as u32)), "Cast(Var(3), U(32))");
+    }
+
+    #[test]
+    fn rule_actions() {
+        let action = Action::Trap(7);
+        assert_eq!(format!("{:?}", rule!(allow getpid())),
+            "Rule { action: Allow, syscall: Getpid, cond: True, archs: [], no_mux: false }");
+        assert_eq!(format!("{:?}", rule!(errno(1) getpid()).action), "Errno(1)");
+        assert_eq!(format!("{:?}", rule!(errno(1 + 1) getpid()).action), "Errno(2)");
+        assert_eq!(format!("{:?}", rule!(kill process getpid()).action), "KillProcess");
+        assert_eq!(format!("{:?}", rule!(kill thread getpid()).action), "KillThread");
+        assert_eq!(format!("{:?}", rule!(trap(3) getpid()).action), "Trap(3)");
+        assert_eq!(format!("{:?}", rule!(trace(u16::MAX) getpid()).action), "Trace(65535)");
+        assert_eq!(format!("{:?}", rule!(log getpid()).action), "Log");
+        assert_eq!(format!("{:?}", rule!(notify getpid()).action), "Notify");
+        assert_eq!(format!("{:?}", rule!({action} getpid()).action), "Trap(7)");
+        assert_eq!(format!("{:?}", rule!({Action::Notify} getpid()).action), "Notify");
+    }
+
+    #[test]
+    fn rule_syscalls() {
+        let syscall = Syscall::Lseek;
+        assert_eq!(format!("{:?}", rule!(allow exit_group(status)).syscall), "ExitGroup");
+        assert_eq!(format!("{:?}", rule!(allow _llseek(fd)).syscall), "_Llseek");
+        assert_eq!(format!("{:?}", rule!(allow break()).syscall), "Break");
+        assert_eq!(format!("{:?}", rule!(allow kill(pid, sig)).syscall), "Kill");
+        assert_eq!(format!("{:?}", rule!(kill process kill(pid, sig)).syscall), "Kill");
+        assert_eq!(format!("{:?}", rule!(allow {syscall}(fd, offset) when offset == 0isize)),
+            "Rule { action: Allow, syscall: Lseek, cond: Cmp(Eq, Var(1), Lit(0, IWord)), archs: [], no_mux: false }");
+    }
+
+    #[test]
+    fn rule_exact() {
+        let syscall = Syscall::Socket;
+        assert!(rule!(allow exact bind(fd, addr, len)).no_mux);
+        assert!(rule!(allow exact {syscall}()).no_mux);
+        assert!(!rule!(allow bind(fd, addr, len)).no_mux);
+        assert_eq!(format!("{:?}", rule!(errno(1) exact socket(domain) on x86 when domain == 1)),
+            "Rule { action: Errno(1), syscall: Socket, cond: Cmp(Eq, Var(0), Lit(1, I(32))), archs: [X86], no_mux: true }");
+    }
+
+    #[test]
+    fn rule_archs() {
+        let native = Arch::Arm;
+        let archs = [Arch::X86, Arch::Aarch64];
+        assert_eq!(format!("{:?}", rule!(allow getpid() on x86).archs), "[X86]");
+        assert_eq!(format!("{:?}", rule!(allow getpid() on x86, x86_64, arm, aarch64).archs), "[X86, X86_64, Arm, Aarch64]");
+        assert_eq!(format!("{:?}", rule!(allow getpid() on {native}).archs), "[Arm]");
+        assert_eq!(format!("{:?}", rule!(allow getpid() on x86_64, {archs[1]}).archs), "[X86_64, Aarch64]");
+        assert_eq!(format!("{:?}", rule!(allow getpid() on x86, x86).archs), "[X86, X86]");
+    }
+
+    #[test]
+    fn rule_conds() {
+        assert_eq!(format!("{:?}", rule!(allow getpid()).cond), "True");
+        assert_eq!(format!("{:?}", rule!(allow getpid() when false).cond), "False");
+        assert_eq!(format!("{:?}", rule!(allow getpid() on arm when true || false).cond), "Or(True, False)");
+        assert_eq!(format!("{:?}", rule!(allow write(fd, buf, count) when fd == 1u32 || count < 2usize).cond),
+            "Or(Cmp(Eq, Var(0), Lit(1, U(32))), Cmp(Lt, Var(2), Lit(2, UWord)))");
+        let c = cond!(@0 == 1);
+        assert_eq!(format!("{:?}", rule!(allow getpid() when {&c} && !{c}).cond),
+            "And(Cmp(Eq, Var(0), Lit(1, I(32))), Not(Cmp(Eq, Var(0), Lit(1, I(32)))))");
+    }
+
+    #[test]
+    fn rule_names() {
+        // `_` skips a position, and the names may stop short of the signature.
+        assert_eq!(format!("{:?}", rule!(allow openat(_, _, flags) when flags == 0).cond),
+            "Cmp(Eq, Var(2), Lit(0, I(32)))");
+        assert_eq!(format!("{:?}", rule!(allow mmap(a, b, c, d, e, f) when f == a).cond), "Cmp(Eq, Var(5), Var(0))");
+        assert_eq!(format!("{:?}", rule!(allow read(fd,) when fd == 0).cond), "Cmp(Eq, Var(0), Lit(0, I(32)))");
+        // `@n` still means position `n` next to the names.
+        assert_eq!(format!("{:?}", rule!(allow read(fd) when fd == @2).cond), "Cmp(Eq, Var(0), Var(2))");
+        // A bare Rust variable is a value, and a name hides one of the same name, even in `{..}`.
+        let fd = 3u32;
+        assert_eq!(format!("{:?}", rule!(allow read(count) when count == fd).cond), "Cmp(Eq, Var(0), Lit(3, U(32)))");
+        assert_eq!(format!("{:?}", rule!(allow read(fd) when fd == {fd}).cond), "Cmp(Eq, Var(0), Var(0))");
+        assert_eq!(fd, 3);
+    }
+
+    #[test]
+    fn lookup() {
+        assert_eq!(Syscall::lookup("read"), Some(Syscall::Read));
+        assert_eq!(Syscall::lookup("_llseek"), Some(Syscall::_Llseek));
+        assert_eq!(Syscall::lookup("skip"), Some(Syscall::Skip));
+        assert_eq!(Syscall::lookup("rea"), None);
+        assert_eq!(Syscall::lookup("readx"), None);
+        assert_eq!(Syscall::lookup("Read"), None);
+        assert_eq!(Syscall::lookup(""), None);
     }
 }
