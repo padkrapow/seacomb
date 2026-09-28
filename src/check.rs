@@ -269,8 +269,8 @@ impl std::fmt::Display for PrimType {
         match self {
             PrimType::I(n) => write!(f, "i{n}"),
             PrimType::U(n) => write!(f, "u{n}"),
-            PrimType::IWord => write!(f, "iword"),
-            PrimType::UWord => write!(f, "uword"),
+            PrimType::IWord => write!(f, "isize"),
+            PrimType::UWord => write!(f, "usize"),
             PrimType::Ptr => write!(f, "ptr"),
         }
     }

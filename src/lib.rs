@@ -12,6 +12,7 @@
 mod asm;
 mod check;
 mod compiler;
+mod macros;
 mod spec;
 pub mod prop;
 
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub use crate::compiler::CompileError;
 pub use crate::check::CheckError;
 pub use crate::spec::{policy::*, syscall::*, cbpf::*, expr::*};
+pub use crate::macros::{ToExpr, ToCond};
 
 verus! {
 
