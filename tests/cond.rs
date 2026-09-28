@@ -899,6 +899,38 @@ fn incompat_sigs() {
     }
 }
 
+/// Argument tests need the syscall's signature to agree only on the architectures their rule is limited to.
+#[test]
+fn incompat_sigs_on_archs() {
+    for (syscall, archs) in [
+        (Syscall::Clone, [Arch::X86_64, Arch::Aarch64]),
+        (Syscall::Chown, [Arch::X86, Arch::X86_64]),
+        (Syscall::Setresuid, [Arch::Arm, Arch::Aarch64]),
+    ] {
+        let mut filter = Filter::with_rule(&archs, syscall, Cond::True).unwrap();
+        filter.add_rule_on_archs(Expect::DENY, syscall, cond!(arg0 == arg0), &archs[..1]).unwrap();
+        filter.add_rule_exact_on_archs(Expect::DENY, syscall, cond!(arg0 == arg0), &archs[1..]).unwrap();
+        assert!(matches!(
+            filter.add_rule_on_archs(Expect::DENY, syscall, cond!(arg0 == arg0), &archs),
+            Err(Error::Check(CheckError::IncompatSigs)),
+        ), "{syscall:?}");
+    }
+    let mut filter = Filter::with_rule(&[Arch::X86_64, Arch::Aarch64], Syscall::Getpid, Cond::True).unwrap();
+    assert!(matches!(
+        filter.add_rule_on_archs(Expect::DENY, Syscall::Open, cond!(arg0 == arg0), &[Arch::Aarch64]),
+        Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
+    ));
+    filter.add_rule_on_archs(Expect::DENY, Syscall::Open, cond!(arg0 == arg0), &[Arch::X86_64]).unwrap();
+}
+
+/// Adding an architecture leaves alone the rules limited to other architectures.
+#[test]
+fn add_arch_skips_limited_rules() {
+    let mut filter = Filter::with_rule(&[Arch::X86], Syscall::Getpid, Cond::True).unwrap();
+    filter.add_rule_on_archs(Expect::DENY, Syscall::Chown, cond!(arg1 == 0u16), &[Arch::X86]).unwrap();
+    filter.add_arch(Arch::X86_64).unwrap();
+}
+
 /// Adding an architecture rechecks the argument tests already in the filter.
 #[test]
 fn add_arch_rechecks() {

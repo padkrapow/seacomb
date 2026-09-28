@@ -463,6 +463,7 @@ impl Rule {
     /// ```
     pub(super) fn emit_tests(&self, b: &mut Builder, arch: Arch) -> (res: Result<(), CompileError>)
         requires
+            self.active_on(arch),
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
             0 < b.rev@.len(), b.wf(),
         ensures

@@ -33,6 +33,9 @@ pub struct Rule {
     pub action: Action,
     pub syscall: Syscall,
     pub cond: Arc<Cond>,
+    /// Limits the rule to the given list of archs.
+    /// If empty, uses the global supported archs.
+    pub archs: Vec<Arch>,
     /// Prevents multiplexing syscalls. For example, a rule for `bind`
     /// should not match `socketcall(2, ...)`.
     pub no_mux: bool,
@@ -83,20 +86,35 @@ impl Action {
 }
 
 impl Rule {
+    /// Active architectures, given the global default architectures.
+    pub open spec fn active_archs(self, default_archs: Seq<Arch>) -> Seq<Arch> {
+        if self.archs@.len() == 0 {
+            default_archs
+        } else {
+            self.archs@
+        }
+    }
+
     /// Well-formedness of a rule, relative to all supported architectures.
-    pub open spec fn wf(self, archs: Seq<Arch>) -> bool {
+    pub open spec fn wf(self, default_archs: Seq<Arch>) -> bool {
+        let active_archs = self.active_archs(default_archs);
         &&& self.action.wf()
-        &&& forall |i: int| 0 <= i < archs.len() ==>
-                self.cond.wf(#[trigger] archs[i], self.syscall.spec_signature(archs[i]))
+        // Local active arch list is well-formed
+        &&& forall |i: int, j: int| #![trigger self.archs@[i], self.archs@[j]]
+                0 <= i < j < self.archs@.len() ==> self.archs@[i] != self.archs@[j]
+        &&& forall |i: int| 0 <= i < self.archs.len() ==> default_archs.contains(#[trigger] self.archs[i])
+        // The condition is well-formed under every active arch
+        &&& forall |i: int| 0 <= i < active_archs.len() ==>
+                self.cond.wf(#[trigger] active_archs[i], self.syscall.spec_signature(active_archs[i]))
         // When allowing mux, the rule should not have any conditions
         // since the multiplexed call may have different argument positions.
         // TODO: Ideally, we should only check this if x86 is enabled
         &&& !self.no_mux && self.syscall.can_mux() ==> *self.cond == Cond::True
         // If a rule's syscall differ in signature on two different supported architectures,
         // it must not impose a condition on the argument.
-        &&& forall |i: int, j: int| #![trigger archs[i], archs[j]]
-                0 <= i < j < archs.len() &&
-                self.syscall.spec_signature(archs[i]) != self.syscall.spec_signature(archs[j])
+        &&& forall |i: int, j: int| #![trigger active_archs[i], active_archs[j]]
+                0 <= i < j < active_archs.len() &&
+                self.syscall.spec_signature(active_archs[i]) != self.syscall.spec_signature(active_archs[j])
                 ==> *self.cond == Cond::True
     }
 }
@@ -247,16 +265,18 @@ impl Rule {
     /// Whether this rule matches event `ev` on `arch`.
     pub open spec fn eval(self, arch: Arch, ev: Event) -> bool {
         let sig = self.syscall.spec_signature(arch);
-        ||| self.syscall.nr(arch) == Some(ev.nr) &&
-            self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
-        // Matching against multiplexed `socketcall` or `ipc` on x86.
-        // NOTE: `Rule::wf` already enforces `*self.cond == Cond::True` if `!self.no_mux`
-        ||| !self.no_mux && arch == Arch::X86 && {
-            ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
-                && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)
-            ||| Syscall::Ipc.nr(arch) == Some(ev.nr)
-                // The kernel dispatches on the low 16 bits of the call number.
-                && self.syscall.to_ipc_arg() == Some(ev.args[0] & 0xFFFF)
+        (self.archs@.len() == 0 || self.archs@.contains(arch)) && {
+            ||| self.syscall.nr(arch) == Some(ev.nr) &&
+                self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
+            // Matching against multiplexed `socketcall` or `ipc` on x86.
+            // NOTE: `Rule::wf` already enforces `*self.cond == Cond::True` if `!self.no_mux`
+            ||| !self.no_mux && arch == Arch::X86 && {
+                ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
+                    && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)
+                ||| Syscall::Ipc.nr(arch) == Some(ev.nr)
+                    // The kernel dispatches on the low 16 bits of the call number.
+                    && self.syscall.to_ipc_arg() == Some(ev.args[0] & 0xFFFF)
+            }
         }
     }
 }

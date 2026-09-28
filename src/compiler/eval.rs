@@ -16,6 +16,11 @@ impl Arch {
 }
 
 impl Rule {
+    /// Whether the rule is evaluated on `arch`, given that the policy includes `arch`.
+    pub(super) open spec fn active_on(self, arch: Arch) -> bool {
+        self.archs@.len() == 0 || self.archs@.contains(arch)
+    }
+
     /// Whether the rule's body accepts `ev`: multiplexer selector and mask `sel` if there
     /// are any, and the rule's condition otherwise.
     pub(super) open spec fn body_holds(self, arch: Arch, sel: Option<(u32, u32)>, ev: Event) -> bool {
@@ -48,7 +53,7 @@ impl Rule {
 
     /// The tests a block emits for this rule come to the rule's own account of matching.
     pub(super) proof fn lemma_matches(self, arch: Arch, ev: Event)
-        requires ev.args.len() == Rule::ARG_COUNT_MAX
+        requires ev.args.len() == Rule::ARG_COUNT_MAX, self.active_on(arch)
         ensures self.matches(arch, ev) <==> self.eval(arch, ev)
     {
         let m = ev.nr;

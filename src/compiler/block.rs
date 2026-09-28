@@ -112,6 +112,31 @@ impl Arch {
     }
 }
 
+impl Rule {
+    /// Executable version of [`Rule::active_on`].
+    fn is_active_on(&self, arch: Arch) -> (res: bool)
+        ensures res == self.active_on(arch)
+    {
+        if self.archs.is_empty() {
+            return true;
+        }
+        let mut i: usize = 0;
+        while i < self.archs.len()
+            invariant
+                i <= self.archs@.len(),
+                forall |k: int| 0 <= k < i ==> #[trigger] self.archs@[k] != arch,
+            decreases self.archs@.len() - i
+        {
+            if self.archs[i] == arch {
+                proof { assert(self.archs@[i as int] == arch); }
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
 impl Action {
     /// Executable version of [`Action::precedence`].
     pub(super) fn priority(&self) -> (res: u8)
@@ -260,14 +285,15 @@ impl Policy {
                             self.dispatch(arch, Event::of(data), priority as int, i as int).to_ret()),
                 decreases self.rules@.len() - i
             {
-                assert(self.rules@[i as int].wf(self.archs@));
-                proof {
-                    let k = choose |k: int| 0 <= k < self.archs@.len() && self.archs@[k] == arch;
-                    assert(self.archs@[k] == arch);
-                }
                 let ghost prev = b.rev@;
                 let ghost rule = self.rules@[i as int];
-                if self.rules[i].action.priority() == priority {
+                if self.rules[i].action.priority() == priority && self.rules[i].is_active_on(arch) {
+                    proof {
+                        assert(rule.wf(self.archs@));
+                        let active = rule.active_archs(self.archs@);
+                        let k = choose |k: int| 0 <= k < active.len() && active[k] == arch;
+                        assert(active[k] == arch);
+                    }
                     self.rules[i].emit_tests(b, arch)?;
                 }
                 proof {
@@ -278,7 +304,7 @@ impl Policy {
                         let ev = Event::of(data);
                         let nr = ev.nr as u32;
                         let want = self.dispatch(arch, ev, priority as int, i + 1).to_ret();
-                        if rule.action.precedence() == priority && !rule.eval(arch, ev) {
+                        if rule.action.precedence() == priority && rule.active_on(arch) && !rule.eval(arch, ev) {
                             assert(Builder::passes(b.rev@, data, b.rev@.len(), r, prev.len(), nr));
                             let t = choose |t: Regs| t.wf() && t.a == nr
                                 && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, prev.len(), t);

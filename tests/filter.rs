@@ -400,6 +400,51 @@ fn aarch64_no_alias() {
     }
 }
 
+/// A rule limited to some architectures applies on those only, and an empty list means all of them.
+#[test]
+fn rule_on_archs() {
+    let native = Arch::native().unwrap();
+    let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
+    let mut filter = Filter::new_native(Action::Allow).unwrap();
+    filter.add_arch(other).unwrap();
+    filter.add_rule_on_archs(Expect::DENY, Syscall::Getpid, Cond::True, &[other]).unwrap();
+    filter.add_rule_on_archs(Expect::DENY, Syscall::Getppid, Cond::True, &[other, native]).unwrap();
+    filter.add_rule_on_archs(Expect::DENY, Syscall::Getuid, Cond::True, &[]).unwrap();
+    filter.add_rule_exact_on_archs(Expect::DENY, Syscall::Getgid, Cond::True, &[other]).unwrap();
+    filter.add_rule_exact_on_archs(Expect::DENY, Syscall::Gettid, Cond::True, &[native]).unwrap();
+    unsafe {
+        filter.install_and_check(libc::SYS_getpid, [0; 6], Expect::Ok);
+        filter.install_and_check(libc::SYS_getppid, [0; 6], Expect::Denied);
+        filter.install_and_check(libc::SYS_getuid, [0; 6], Expect::Denied);
+        filter.install_and_check(libc::SYS_getgid, [0; 6], Expect::Ok);
+        filter.install_and_check(libc::SYS_gettid, [0; 6], Expect::Denied);
+    }
+}
+
+/// A rule's architectures must be distinct and already added to the filter.
+#[test]
+fn rule_on_archs_checks() {
+    let native = Arch::native().unwrap();
+    let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
+    let mut filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Getpid, Cond::True).unwrap();
+    assert!(matches!(
+        filter.add_rule_on_archs(Expect::DENY, Syscall::Getppid, Cond::True, &[other]),
+        Err(Error::Check(CheckError::RuleArchNotEnabled)),
+    ));
+    assert!(matches!(
+        filter.add_rule_exact_on_archs(Expect::DENY, Syscall::Getppid, Cond::True, &[native, other]),
+        Err(Error::Check(CheckError::RuleArchNotEnabled)),
+    ));
+    assert!(matches!(
+        filter.add_rule_on_archs(Expect::DENY, Syscall::Getppid, Cond::True, &[native, native]),
+        Err(Error::Check(CheckError::DuplicateArch)),
+    ));
+    unsafe {
+        filter.install_and_check(libc::SYS_getpid, [0; 6], Expect::Denied);
+        filter.install_and_check(libc::SYS_getppid, [0; 6], Expect::Ok);
+    }
+}
+
 /// A native filter already has the native architecture and takes every other one.
 #[test]
 fn new_native() {

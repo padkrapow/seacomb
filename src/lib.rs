@@ -207,16 +207,42 @@ impl Filter {
             final(self).policy().archs == old(self).policy().archs,
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
-            res is Ok ==>
-                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
-                    action,
-                    syscall,
-                    cond: Arc::new(cond),
-                    no_mux: false,
-                }),
+            res is Ok ==> {
+                let rule = final(self).policy().rules@.last();
+                &&& final(self).policy().rules@ == old(self).policy().rules@.push(rule)
+                &&& rule.action == action
+                &&& rule.syscall == syscall
+                &&& *rule.cond == cond
+                &&& rule.archs@ == seq![]
+                &&& rule.no_mux == false
+            },
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        self.add_rule_with_mux(action, syscall, cond, false)
+        self.add_rule_internal(Rule { action, syscall, cond: Arc::new(cond), archs: Vec::new(), no_mux: false })
+    }
+
+    /// Applies `action` to `syscall` when `cond` holds, on the architectures in `archs` only.
+    pub fn add_rule_on_archs(&mut self, action: Action, syscall: Syscall, cond: Cond, archs: &[Arch])
+        -> (res: Result<(), Error>)
+        requires old(self).wf()
+        ensures
+            final(self).wf(),
+            final(self).policy().archs == old(self).policy().archs,
+            final(self).policy().act_no_match == old(self).policy().act_no_match,
+            final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
+            res is Ok ==> {
+                let rule = final(self).policy().rules@.last();
+                &&& final(self).policy().rules@ == old(self).policy().rules@.push(rule)
+                &&& rule.action == action
+                &&& rule.syscall == syscall
+                &&& *rule.cond == cond
+                &&& rule.archs@ == archs@
+                &&& rule.no_mux == false
+            },
+            res is Err ==> final(self).policy() == old(self).policy(),
+    {
+        let archs = vstd::slice::slice_to_vec(archs);
+        self.add_rule_internal(Rule { action, syscall, cond: Arc::new(cond), archs, no_mux: false })
     }
 
     /// Adds a rule for the exact syscall number only. For example, on x86,
@@ -229,19 +255,22 @@ impl Filter {
             final(self).policy().archs == old(self).policy().archs,
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
-            res is Ok ==>
-                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
-                    action,
-                    syscall,
-                    cond: Arc::new(cond),
-                    no_mux: true,
-                }),
+            res is Ok ==> {
+                let rule = final(self).policy().rules@.last();
+                &&& final(self).policy().rules@ == old(self).policy().rules@.push(rule)
+                &&& rule.action == action
+                &&& rule.syscall == syscall
+                &&& *rule.cond == cond
+                &&& rule.archs@ == seq![]
+                &&& rule.no_mux == true
+            },
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        self.add_rule_with_mux(action, syscall, cond, true)
+        self.add_rule_internal(Rule { action, syscall, cond: Arc::new(cond), archs: Vec::new(), no_mux: true })
     }
 
-    fn add_rule_with_mux(&mut self, action: Action, syscall: Syscall, cond: Cond, no_mux: bool)
+    /// Adds a rule for the exact syscall number only, on the architectures in `archs` only.
+    pub fn add_rule_exact_on_archs(&mut self, action: Action, syscall: Syscall, cond: Cond, archs: &[Arch])
         -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
@@ -249,16 +278,31 @@ impl Filter {
             final(self).policy().archs == old(self).policy().archs,
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
-            res is Ok ==>
-                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
-                    action,
-                    syscall,
-                    cond: Arc::new(cond),
-                    no_mux,
-                }),
+            res is Ok ==> {
+                let rule = final(self).policy().rules@.last();
+                &&& final(self).policy().rules@ == old(self).policy().rules@.push(rule)
+                &&& rule.action == action
+                &&& rule.syscall == syscall
+                &&& *rule.cond == cond
+                &&& rule.archs@ == archs@
+                &&& rule.no_mux == true
+            },
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        let rule = Rule { action, syscall, cond: Arc::new(cond), no_mux };
+        let archs = vstd::slice::slice_to_vec(archs);
+        self.add_rule_internal(Rule { action, syscall, cond: Arc::new(cond), archs, no_mux: true })
+    }
+
+    fn add_rule_internal(&mut self, rule: Rule) -> (res: Result<(), Error>)
+        requires old(self).wf()
+        ensures
+            final(self).wf(),
+            final(self).policy().archs == old(self).policy().archs,
+            final(self).policy().act_no_match == old(self).policy().act_no_match,
+            final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
+            res is Ok ==> final(self).policy().rules@ == old(self).policy().rules@.push(rule),
+            res is Err ==> final(self).policy() == old(self).policy(),
+    {
         if let Err(err) = rule.check(self.policy.archs.as_slice()) {
             return Err(Error::Check(err));
         }

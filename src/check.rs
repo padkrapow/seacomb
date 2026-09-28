@@ -35,6 +35,9 @@ pub enum CheckError {
     /// The filter already includes this architecture.
     #[error("filter already includes this architecture")]
     DuplicateArch,
+    /// A rule uses an architecture not added to the filter.
+    #[error("rule uses an architecture not added to the filter")]
+    RuleArchNotEnabled,
 }
 
 impl Action {
@@ -198,6 +201,63 @@ impl Rule {
         ensures res is Ok ==> self.wf(archs@)
     {
         self.action.check()?;
+        let mut i: usize = 0;
+        while i < self.archs.len()
+            invariant
+                i <= self.archs@.len(),
+                forall |k: int, l: int| #![trigger self.archs@[k], self.archs@[l]]
+                    0 <= k < l < i ==> self.archs@[k] != self.archs@[l],
+                forall |k: int| 0 <= k < i ==> archs@.contains(#[trigger] self.archs@[k]),
+            decreases self.archs@.len() - i
+        {
+            let arch = self.archs[i];
+            let mut j: usize = 0;
+            while j < i
+                invariant
+                    i < self.archs@.len(),
+                    arch == self.archs@[i as int],
+                    j <= i,
+                    forall |k: int| 0 <= k < j ==> #[trigger] self.archs@[k] != arch,
+                decreases i - j
+            {
+                if self.archs[j] == arch {
+                    return Err(CheckError::DuplicateArch);
+                }
+                j += 1;
+            }
+            let mut j: usize = 0;
+            while j < archs.len() && archs[j] != arch
+                invariant
+                    j <= archs@.len(),
+                    forall |k: int| 0 <= k < j ==> #[trigger] archs@[k] != arch,
+                decreases archs@.len() - j
+            {
+                j += 1;
+            }
+            if j == archs.len() {
+                return Err(CheckError::RuleArchNotEnabled);
+            }
+            proof {
+                assert(archs@[j as int] == arch);
+            }
+            i += 1;
+        }
+        let active = if self.archs.is_empty() { archs } else { self.archs.as_slice() };
+        self.check_on(active)
+    }
+
+    /// Checks the rule's condition and signatures against every architecture in `archs`.
+    fn check_on(&self, archs: &[Arch]) -> (res: Result<(), CheckError>)
+        ensures res is Ok ==> {
+            &&& forall |k: int| 0 <= k < archs@.len() ==>
+                    self.cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k]))
+            &&& !self.no_mux && self.syscall.can_mux() ==> *self.cond == Cond::True
+            &&& forall |k: int, l: int| #![trigger archs@[k], archs@[l]]
+                    0 <= k < l < archs@.len() &&
+                    self.syscall.spec_signature(archs@[k]) != self.syscall.spec_signature(archs@[l])
+                    ==> *self.cond == Cond::True
+        }
+    {
         let cond = &*self.cond;
         let constrained = !matches!(cond, Cond::True);
         if constrained && !self.no_mux && (self.syscall.socketcall_arg().is_some() || self.syscall.ipc_arg().is_some()) {
