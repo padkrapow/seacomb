@@ -1,4 +1,4 @@
-//! Helper macros to construct `Expr` and `Cond`.
+//! Helper macros to construct `Expr`, `Cond`, and `Rule`.
 
 use vstd::prelude::*;
 use std::sync::Arc;
@@ -83,18 +83,14 @@ macro_rules! expr {
     };
 
     // cast  := (value | atom) ('as' ty)*
-    // value := literal | arg
-    // arg   := arg0 | arg1 | arg2 | arg3 | arg4 | arg5
+    // value := literal | arg | ident
+    // arg   := '@' integer
     // A value takes its Rust type, so an unsuffixed literal is an `i32`.
     (@cast $l:literal $($rest:tt)*) => { $crate::expr!(@as [$crate::ToExpr::to_expr($l)] $($rest)*) };
-    (@cast arg0 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(0))] $($rest)*) };
-    (@cast arg1 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(1))] $($rest)*) };
-    (@cast arg2 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(2))] $($rest)*) };
-    (@cast arg3 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(3))] $($rest)*) };
-    (@cast arg4 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(4))] $($rest)*) };
-    (@cast arg5 $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var(5))] $($rest)*) };
+    (@cast @ $n:literal $($rest:tt)*) => { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Var($n))] $($rest)*) };
+    (@cast @ $($rest:tt)*) => { compile_error!(concat!("expected an argument index after `@`, found `", stringify!($($rest)*), "`")) };
     (@cast $x:ident $($rest:tt)*) =>
-        { compile_error!(concat!("expected an operand, found `", stringify!($x), "`; wrap a Rust value in `{..}`")) };
+        { $crate::expr!(@as [$crate::ToExpr::to_expr(::std::clone::Clone::clone(&$x))] $($rest)*) };
     (@cast $a:tt $($rest:tt)*) => { $crate::expr!(@as [$crate::expr!(@atom $a)] $($rest)*) };
     (@as [$($e:tt)*] as $ty:ident $($rest:tt)*) =>
         { $crate::expr!(@as [::std::sync::Arc::new($crate::Expr::Cast($($e)*, $crate::expr!(@ty $ty)))] $($rest)*) };
@@ -189,6 +185,73 @@ macro_rules! cond {
     ($($t:tt)*) => { ::std::sync::Arc::unwrap_or_clone($crate::cond!(@arc $($t)*)) };
 }
 
+/// Parses a rule into a `Rule`.
+#[macro_export]
+macro_rules! rule {
+    // rule   := action ['exact'] syscall '(' names ')' ['on' arch (',' arch)*] ['when' cond]
+    // action := allow | errno '(' rust-expr ')' | kill process | kill thread
+    (allow $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Allow] $($rest)*) };
+    (errno ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::Errno($e)] $($rest)*) };
+    (kill process $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::KillProcess] $($rest)*) };
+    (kill thread $($rest:tt)*) => { $crate::rule!(@exact [$crate::Action::KillThread] $($rest)*) };
+
+    // `exact` sets `no_mux`.
+    (@exact [$($act:tt)*] exact $name:ident ( $($names:tt)* ) $($rest:tt)*) =>
+        { $crate::rule!(@on [$($act)*] true $name [$($names)*] $($rest)*) };
+    (@exact [$($act:tt)*] $name:ident ( $($names:tt)* ) $($rest:tt)*) =>
+        { $crate::rule!(@on [$($act)*] false $name [$($names)*] $($rest)*) };
+    (@exact [$($act:tt)*] $($t:tt)*) =>
+        { compile_error!(concat!("expected a syscall, found `", stringify!($($t)*), "`")) };
+
+    // An empty `on` leaves `archs` empty, and an empty `when` is `true`.
+    (@on $act:tt $exact:tt $name:ident $names:tt on $($arch:ident),+ when $($c:tt)+) =>
+        { $crate::rule!(@mk $act $exact $name $names [$($arch),+] [$($c)+]) };
+    (@on $act:tt $exact:tt $name:ident $names:tt on $($arch:ident),+) =>
+        { $crate::rule!(@mk $act $exact $name $names [$($arch),+] [true]) };
+    (@on $act:tt $exact:tt $name:ident $names:tt when $($c:tt)+) =>
+        { $crate::rule!(@mk $act $exact $name $names [] [$($c)+]) };
+    (@on $act:tt $exact:tt $name:ident $names:tt) =>
+        { $crate::rule!(@mk $act $exact $name $names [] [true]) };
+    (@on $act:tt $exact:tt $name:ident $names:tt $($t:tt)*) =>
+        { compile_error!(concat!("expected `on` or `when`, found `", stringify!($($t)*), "`")) };
+
+    // Binds each name to the argument at its position, so `when` can refer to it.
+    (@mk [$($act:tt)*] $exact:tt $name:ident [$($arg:tt),* $(,)?] [$($arch:ident),*] [$($c:tt)*]) => {{
+        $( $crate::rule!(@name $arg); )*
+        #[allow(unused_variables)]
+        let [$($arg,)* ..] = [
+            $crate::Expr::Var(0), $crate::Expr::Var(1), $crate::Expr::Var(2),
+            $crate::Expr::Var(3), $crate::Expr::Var(4), $crate::Expr::Var(5),
+        ];
+        $crate::Rule {
+            action: $($act)*,
+            syscall: const {
+                match $crate::Syscall::lookup(stringify!($name)) {
+                    Some(s) => s,
+                    None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
+                }
+            },
+            cond: $crate::cond!(@arc $($c)*),
+            archs: ::std::vec![$( $crate::rule!(@arch $arch) ),*],
+            no_mux: $exact,
+        }
+    }};
+
+    // name := ident | '_'
+    (@name $x:ident) => {};
+    (@name _) => {};
+    (@name $x:tt) => { compile_error!(concat!("expected an argument name, found `", stringify!($x), "`")) };
+
+    // arch := x86 | x86_64 | arm | aarch64
+    (@arch x86) => { $crate::Arch::X86 };
+    (@arch x86_64) => { $crate::Arch::X86_64 };
+    (@arch arm) => { $crate::Arch::Arm };
+    (@arch aarch64) => { $crate::Arch::Aarch64 };
+    (@arch $a:ident) => { compile_error!(concat!("unknown arch `", stringify!($a), "`")) };
+
+    ($($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -224,9 +287,9 @@ mod tests {
         let max = u64::MAX;
         assert_eq!(format!("{:?}", expr!({small})), "Lit(9, U(16))");
         assert_eq!(format!("{:?}", expr!({max})), "Lit(-1, U(64))");
-        let owned = expr!(arg0 + 1);
+        let owned = expr!(@0 + 1);
         let borrowed: &Expr = &owned;
-        let shared: Arc<Expr> = Arc::new(expr!(arg1));
+        let shared: Arc<Expr> = Arc::new(expr!(@1));
         assert_eq!(format!("{:?}", expr!({borrowed} & 3)), "BinOp(And, BinOp(Add, Var(0), Lit(1, I(32))), Lit(3, I(32)))");
         assert_eq!(format!("{:?}", expr!({shared} as u32)), "Cast(Var(1), U(32))");
         assert_eq!(format!("{:?}", expr!({owned})), "BinOp(Add, Var(0), Lit(1, I(32)))");
@@ -239,31 +302,31 @@ mod tests {
         assert_eq!(format!("{:?}", expr!(-1 as ptr)), "Cast(Lit(-1, I(32)), Ptr)");
         assert_eq!(format!("{:?}", expr!(1u64 as usize)), "Cast(Lit(1, U(64)), UWord)");
         assert_eq!(format!("{:?}", expr!(1 as ty)), "Cast(Lit(1, I(32)), I(16))");
-        assert_eq!(format!("{:?}", expr!(arg0 as u32 as isize)), "Cast(Cast(Var(0), U(32)), IWord)");
+        assert_eq!(format!("{:?}", expr!(@0 as u32 as isize)), "Cast(Cast(Var(0), U(32)), IWord)");
     }
 
     #[test]
     fn operators() {
-        assert_eq!(format!("{:?}", expr!(arg0 - 1 - 2)), "BinOp(Sub, BinOp(Sub, Var(0), Lit(1, I(32))), Lit(2, I(32)))");
-        assert_eq!(format!("{:?}", expr!(arg0 - -1)), "BinOp(Sub, Var(0), Lit(-1, I(32)))");
-        assert_eq!(format!("{:?}", expr!(-1 + arg0)), "BinOp(Add, Lit(-1, I(32)), Var(0))");
-        assert_eq!(format!("{:?}", expr!(arg0 | 1 ^ 2 & 3 + 4)),
+        assert_eq!(format!("{:?}", expr!(@0 - 1 - 2)), "BinOp(Sub, BinOp(Sub, Var(0), Lit(1, I(32))), Lit(2, I(32)))");
+        assert_eq!(format!("{:?}", expr!(@0 - -1)), "BinOp(Sub, Var(0), Lit(-1, I(32)))");
+        assert_eq!(format!("{:?}", expr!(-1 + @0)), "BinOp(Add, Lit(-1, I(32)), Var(0))");
+        assert_eq!(format!("{:?}", expr!(@0 | 1 ^ 2 & 3 + 4)),
             "BinOp(Or, Var(0), BinOp(Xor, Lit(1, I(32)), BinOp(And, Lit(2, I(32)), BinOp(Add, Lit(3, I(32)), Lit(4, I(32))))))");
-        assert_eq!(format!("{:?}", expr!((arg0 | 1) & 2)), "BinOp(And, BinOp(Or, Var(0), Lit(1, I(32))), Lit(2, I(32)))");
-        assert_eq!(format!("{:?}", expr!(arg0 + 1 as u8)), "BinOp(Add, Var(0), Cast(Lit(1, I(32)), U(8)))");
+        assert_eq!(format!("{:?}", expr!((@0 | 1) & 2)), "BinOp(And, BinOp(Or, Var(0), Lit(1, I(32))), Lit(2, I(32)))");
+        assert_eq!(format!("{:?}", expr!(@0 + 1 as u8)), "BinOp(Add, Var(0), Cast(Lit(1, I(32)), U(8)))");
         assert_eq!(format!("{:?}", expr!({Expr::Var(1 + 1)})), "Var(2)");
     }
 
     #[test]
     fn comparisons() {
-        assert_eq!(format!("{:?}", cond!(arg0 == 1)), "Cmp(Eq, Var(0), Lit(1, I(32)))");
-        assert_eq!(format!("{:?}", cond!(arg0 != 1)), "Not(Cmp(Eq, Var(0), Lit(1, I(32))))");
-        assert_eq!(format!("{:?}", cond!(arg0 < 1)), "Cmp(Lt, Var(0), Lit(1, I(32)))");
-        assert_eq!(format!("{:?}", cond!(arg0 <= 1)), "Cmp(Le, Var(0), Lit(1, I(32)))");
-        assert_eq!(format!("{:?}", cond!(arg0 > 1)), "Cmp(Lt, Lit(1, I(32)), Var(0))");
-        assert_eq!(format!("{:?}", cond!(arg0 >= 1)), "Cmp(Le, Lit(1, I(32)), Var(0))");
-        assert_eq!(format!("{:?}", cond!(arg0 < -1)), "Cmp(Lt, Var(0), Lit(-1, I(32)))");
-        assert_eq!(format!("{:?}", cond!(arg0 & 1u8 == 0u8)), "Cmp(Eq, BinOp(And, Var(0), Lit(1, U(8))), Lit(0, U(8)))");
+        assert_eq!(format!("{:?}", cond!(@0 == 1)), "Cmp(Eq, Var(0), Lit(1, I(32)))");
+        assert_eq!(format!("{:?}", cond!(@0 != 1)), "Not(Cmp(Eq, Var(0), Lit(1, I(32))))");
+        assert_eq!(format!("{:?}", cond!(@0 < 1)), "Cmp(Lt, Var(0), Lit(1, I(32)))");
+        assert_eq!(format!("{:?}", cond!(@0 <= 1)), "Cmp(Le, Var(0), Lit(1, I(32)))");
+        assert_eq!(format!("{:?}", cond!(@0 > 1)), "Cmp(Lt, Lit(1, I(32)), Var(0))");
+        assert_eq!(format!("{:?}", cond!(@0 >= 1)), "Cmp(Le, Lit(1, I(32)), Var(0))");
+        assert_eq!(format!("{:?}", cond!(@0 < -1)), "Cmp(Lt, Var(0), Lit(-1, I(32)))");
+        assert_eq!(format!("{:?}", cond!(@0 & 1u8 == 0u8)), "Cmp(Eq, BinOp(And, Var(0), Lit(1, U(8))), Lit(0, U(8)))");
     }
 
     #[test]
@@ -272,7 +335,7 @@ mod tests {
         assert_eq!(format!("{:?}", cond!((true || false) && true)), "And(Or(True, False), True)");
         assert_eq!(format!("{:?}", cond!(!true)), "Not(True)");
         assert_eq!(format!("{:?}", cond!(!!false)), "Not(Not(False))");
-        assert_eq!(format!("{:?}", cond!(!(arg0 == 1) || arg1 < 2)),
+        assert_eq!(format!("{:?}", cond!(!(@0 == 1) || @1 < 2)),
             "Or(Not(Cmp(Eq, Var(0), Lit(1, I(32)))), Cmp(Lt, Var(1), Lit(2, I(32))))");
     }
 
@@ -281,16 +344,16 @@ mod tests {
         assert_eq!(format!("{:?}", expr!({u64::MAX})), "Lit(-1, U(64))");
         assert_eq!(format!("{:?}", expr!({i32::MIN})), "Lit(-2147483648, I(32))");
         assert_eq!(format!("{:?}", expr!({u8::MAX} as u16)), "Cast(Lit(255, U(8)), U(16))");
-        assert_eq!(format!("{:?}", expr!(arg0 & {u16::MAX})), "BinOp(And, Var(0), Lit(65535, U(16)))");
-        assert_eq!(format!("{:?}", cond!(arg0 < {i8::MIN})), "Cmp(Lt, Var(0), Lit(-128, I(8)))");
+        assert_eq!(format!("{:?}", expr!(@0 & {u16::MAX})), "BinOp(And, Var(0), Lit(65535, U(16)))");
+        assert_eq!(format!("{:?}", cond!(@0 < {i8::MIN})), "Cmp(Lt, Var(0), Lit(-128, I(8)))");
     }
 
     #[test]
     fn cond_variables() {
-        let owned = cond!(arg0 == 1);
+        let owned = cond!(@0 == 1);
         let borrowed: &Cond = &owned;
         let shared: Arc<Cond> = Arc::new(cond!(false));
-        assert_eq!(format!("{:?}", cond!({borrowed} && arg1 < 2)),
+        assert_eq!(format!("{:?}", cond!({borrowed} && @1 < 2)),
             "And(Cmp(Eq, Var(0), Lit(1, I(32))), Cmp(Lt, Var(1), Lit(2, I(32))))");
         assert_eq!(format!("{:?}", cond!(!{borrowed} || ({borrowed}))),
             "Or(Not(Cmp(Eq, Var(0), Lit(1, I(32)))), Cmp(Eq, Var(0), Lit(1, I(32))))");
@@ -304,14 +367,14 @@ mod tests {
         assert_eq!(format!("{:?}", expr!({1 + 1})), "Lit(2, I(32))");
         assert_eq!(format!("{:?}", expr!({v[1]} as u16)), "Cast(Lit(8, U(8)), U(16))");
         assert_eq!(format!("{:?}", expr!({v.len()})), "Lit(2, UWord)");
-        assert_eq!(format!("{:?}", expr!({Expr::Var(6)} + arg5)), "BinOp(Add, Var(6), Var(5))");
-        assert_eq!(format!("{:?}", cond!(arg0 == {i16::MIN + 1})), "Cmp(Eq, Var(0), Lit(-32767, I(16)))");
+        assert_eq!(format!("{:?}", expr!({Expr::Var(6)} + @5)), "BinOp(Add, Var(6), Var(5))");
+        assert_eq!(format!("{:?}", cond!(@0 == {i16::MIN + 1})), "Cmp(Eq, Var(0), Lit(-32767, I(16)))");
     }
 
     #[test]
     fn args() {
-        assert_eq!(format!("{:?}", expr!(arg0 + arg1 + arg2 + arg3 + arg4 + arg5)),
+        assert_eq!(format!("{:?}", expr!(@0 + @1 + @2 + @3 + @4 + @5)),
             "BinOp(Add, BinOp(Add, BinOp(Add, BinOp(Add, BinOp(Add, Var(0), Var(1)), Var(2)), Var(3)), Var(4)), Var(5))");
-        assert_eq!(format!("{:?}", expr!(arg3 as u32)), "Cast(Var(3), U(32))");
+        assert_eq!(format!("{:?}", expr!(@3 as u32)), "Cast(Var(3), U(32))");
     }
 }
