@@ -3,6 +3,9 @@
 
 Usage: python3 tests/run.py [all|x86_64|i686|aarch64|armv7l]
 
+The doctests run the same way: cargo hands each one to this script as its target runner,
+through `--boot`, which boots the binary and exits with its status.
+
 The test binaries are static musl executables, so a guest needs nothing but a kernel.
 Each binary is packed into an initramfs as /init and booted with a pinned Alpine kernel,
 downloaded once into target/test-kernels. The serial console carries the test output,
@@ -77,18 +80,33 @@ def run(*args, capture=False):
                           stdout=subprocess.PIPE if capture else None).stdout
 
 
-def build(target):
-    """Builds the test binaries for `target` and returns their paths."""
-    output = run("cargo", "test", "--no-run", "--locked", "--target", target,
-                 "--config", f'target.{target}.linker="rust-lld"',
+def build(targets):
+    """Builds the test binaries for all `targets` in one cargo run and returns their paths per target."""
+    flags = []
+    for target in targets:
+        flags += ["--target", target, "--config", f'target.{target}.linker="rust-lld"']
+    output = run("cargo", "test", "--no-run", "--locked", *flags,
                  "--target-dir", str(BUILD_DIR),
                  "--message-format=json-render-diagnostics", capture=True)
     artifacts = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
-    binaries = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact"
-                and a["profile"]["test"] and a.get("executable")]
-    if not binaries:
-        sys.exit(f"No test executables built for {target}.")
+    binaries = {target: [] for target in targets}
+    for a in artifacts:
+        if a.get("reason") == "compiler-artifact" and a["profile"]["test"] and a.get("executable"):
+            # Each target builds under its own `<target-dir>/<target>/`.
+            binaries[Path(a["executable"]).relative_to(BUILD_DIR).parts[0]].append(a["executable"])
+    for target, paths in binaries.items():
+        if not paths:
+            sys.exit(f"No test executables built for {target}.")
     return binaries
+
+
+def test_doc(target, machine_arch):
+    """Builds the doctests for `target` and has cargo boot each one through `--boot`."""
+    runner = json.dumps([sys.executable, str(Path(__file__).resolve()), "--boot", machine_arch])
+    run("cargo", "test", "--doc", "--locked", "--target", target,
+        "--config", f'target.{target}.linker="rust-lld"',
+        "--config", f"target.{target}.runner={runner}",
+        "--target-dir", str(BUILD_DIR))
 
 
 def fetch_kernel(machine):
@@ -163,26 +181,42 @@ def boot(arch, binary, scratch):
     return status
 
 
+def exit_code(arch, binary, scratch):
+    """Boots `binary` on `arch` and returns its exit code, exiting on a signal or a lost status."""
+    status = boot(arch, binary, scratch)
+    if status is None:
+        sys.exit(f"The {arch} kernel stopped before {binary} exited.")
+    code = os.waitstatus_to_exitcode(status)
+    if code < 0:
+        sys.exit(f"{binary} on {arch} was killed by signal {-code}.")
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build tests on the host and run them in QEMU.")
     parser.add_argument("arch", nargs="?", default="all", choices=["all", *TARGETS])
+    parser.add_argument("--boot", nargs=2, metavar=("MACHINE", "BINARY"),
+                        help="boot one binary and exit with its status, as cargo's target runner")
     args = parser.parse_args()
 
+    if args.boot:
+        machine_arch, binary = args.boot
+        with tempfile.TemporaryDirectory() as scratch:
+            sys.exit(exit_code(machine_arch, binary, Path(scratch)))
+
     started = time.monotonic()
+    arches = list(TARGETS) if args.arch == "all" else [args.arch]
+    binaries = build([TARGETS[arch][0] for arch in arches])
     with tempfile.TemporaryDirectory() as scratch:
-        for arch in TARGETS if args.arch == "all" else [args.arch]:
+        for arch in arches:
             target, machine_arch = TARGETS[arch]
-            for binary in build(target):
-                print(f"\n==> Testing {arch}", flush=True)
-                status = boot(machine_arch, binary, Path(scratch))
-                if status is None:
-                    sys.exit(f"The {arch} kernel stopped before the tests exited.")
-                code = os.waitstatus_to_exitcode(status)
-                if code < 0:
-                    sys.exit(f"The {arch} tests were killed by signal {-code}.")
-                if code > 0:
+            for binary in sorted(binaries[target]):
+                print(f"==> Testing {arch}: {Path(binary).name}", flush=True)
+                if code := exit_code(machine_arch, binary, Path(scratch)):
                     sys.exit(code)
-    print(f"\nAll selected tests passed in {time.monotonic() - started:.1f}s.")
+            print(f"==> Testing {arch}: doctests", flush=True)
+            test_doc(target, machine_arch)
+    print(f"All selected tests passed in {time.monotonic() - started:.1f}s.")
 
 
 if __name__ == "__main__":
