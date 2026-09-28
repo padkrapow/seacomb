@@ -78,6 +78,34 @@ python3 tests/run.py
 python3 tests/run.py aarch64
 ```
 
+## Trusted computing base and how AI agents are involved
+
+Formal verification helps reducing the amount of code we need to *trust*,
+by machine-checking the executable code against simpler formal/mathemtical
+specifications and properties.
+
+Using this method, this repo implicitly has two kinds of code/proofs:
+(a) trusted specifications that need to be carefully edited and manually audited,
+and (b) executable code and proofs that do not need to be trusted.
+
+Part (a) is mostly contained in `src/spec/`, including the syntax and semantics of
+`seacomb`'s policy DSL, cBPF, and type signatures of all supported syscalls.
+These specs were written with assistance of AI agents, but heavily audited and understood manually.
+
+Part (b) notably includes the compiler implementation and its correctness proofs in
+`src/compiler.rs` and `src/compiler/`.
+They are mostly generated using Claude Code and Codex,
+but their *correctness* against the specs in `src/spec/` is automatically verified by
+[Verus](https://github.com/verus-lang/verus).
+
+There are some other components that are in a "gray area," which are verified for simpler
+properties like panic-freedom and termination, but they are not verified to be functionally correct
+or lacking formal specs.
+The assembler in `src/asm.rs` is an example, which is used for converting an AST of cBPF program
+to actual binary formats used by the kernel.
+The actual installaion of the policies (`Filter::install` and `RawProgram::install_with_flags`)
+is also not verified and marked `unsafe` since it requires low-level syscalls.
+
 ## Related work
 
 - [Jitk: A Trustworthy In-Kernel Interpreter Infrastructure](https://dl.acm.org/doi/10.5555/2685048.2685052)
