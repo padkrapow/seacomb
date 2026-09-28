@@ -25,7 +25,7 @@ pub use crate::macros::{ToExpr, ToCond};
 
 verus! {
 
-/// An error while creating, updating, compiling, or installing a filter.
+/// An error while creating, updating, compiling, or installing a policy.
 #[verifier::external_derive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -36,8 +36,8 @@ pub enum Error {
     /// The policy could not be compiled into a filter program.
     #[error("failed to compile the policy")]
     Compile(#[source] CompileError),
-    /// The filter has no architectures enabled.
-    #[error("filter has no architectures enabled")]
+    /// The policy has no architectures enabled.
+    #[error("policy has no architectures enabled")]
     NoArch,
     /// The native architecture is not supported.
     #[error("native architecture is not supported")]
@@ -70,208 +70,152 @@ impl Arch {
     }
 }
 
-/// A policy under construction and its filter options.
-#[derive(Debug, Clone, PartialEq, Eq)]
-// Verus does not yet model non-Copy Clone derives.
-#[verifier::external_derive(Clone)]
-pub struct Filter {
-    policy: Policy,
-    /// Set `no_new_privs` before installing the filter.
-    ctl_nnp: bool,
-    /// Synchronize the installed filter across all threads.
-    ctl_tsync: bool,
-    /// Request logging of all filter actions except `Allow`.
-    ctl_log: bool,
-    // TODO: Support `ctl_waitkill`
-}
-
-impl Filter {
-    pub closed spec fn wf(self) -> bool {
-        self.policy.wf()
-    }
-
-    pub closed spec fn policy(self) -> Policy {
-        self.policy
-    }
-
-    /// Creates a filter with default action `act_no_match` and no architectures enabled.
-    pub fn new(act_no_match: Action) -> (res: Result<Filter, Error>)
-        ensures res matches Ok(f) ==> {
-            &&& f.wf()
-            &&& f.policy().act_no_match == act_no_match
-            &&& f.policy().act_bad_arch == Action::KillThread
-            &&& f.policy().archs@.len() == 0
-            &&& f.policy().rules@.len() == 0
+impl Policy {
+    /// Creates a policy with default action `act_no_match` and no architectures enabled.
+    pub fn new(act_no_match: Action) -> (res: Result<Policy, Error>)
+        ensures res matches Ok(p) ==> {
+            &&& p.wf()
+            &&& p.act_no_match == act_no_match
+            &&& p.act_bad_arch == Action::KillThread
+            &&& p.archs@.len() == 0
+            &&& p.rules@.len() == 0
         }
     {
         if let Err(err) = act_no_match.check() {
             return Err(Error::Check(err));
         }
-        Ok(Filter {
-            policy: Policy {
-                archs: Vec::new(),
-                rules: Vec::new(),
-                act_no_match,
-                act_bad_arch: Action::KillThread,
-            },
-            ctl_nnp: true,
-            ctl_tsync: false,
-            ctl_log: false,
+        Ok(Policy {
+            archs: Vec::new(),
+            rules: Vec::new(),
+            act_no_match,
+            act_bad_arch: Action::KillThread,
         })
     }
 
-    /// Creates a filter over the running architecture with default action `act_no_match`.
-    pub fn new_native(act_no_match: Action) -> (res: Result<Filter, Error>)
-        ensures res matches Ok(f) ==> {
-            &&& f.wf()
-            &&& f.policy().act_no_match == act_no_match
-            &&& f.policy().act_bad_arch == Action::KillThread
-            &&& f.policy().archs@.len() == 1
-            &&& f.policy().rules@.len() == 0
+    /// Creates a policy over the running architecture with default action `act_no_match`.
+    pub fn new_native(act_no_match: Action) -> (res: Result<Policy, Error>)
+        ensures res matches Ok(p) ==> {
+            &&& p.wf()
+            &&& p.act_no_match == act_no_match
+            &&& p.act_bad_arch == Action::KillThread
+            &&& p.archs@.len() == 1
+            &&& p.rules@.len() == 0
         }
     {
-        let mut filter = Self::new(act_no_match)?;
-        filter.add_arch(Arch::native()?)?;
-        Ok(filter)
+        let mut policy = Self::new(act_no_match)?;
+        policy.add_arch(Arch::native()?)?;
+        Ok(policy)
     }
 
-    /// Adds `arch` to the architectures covered by this filter's rules.
+    /// Adds `arch` to the architectures covered by this policy's rules.
     pub fn add_arch(&mut self, arch: Arch) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
-            final(self).policy().act_no_match == old(self).policy().act_no_match,
-            final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
-            final(self).policy().rules == old(self).policy().rules,
-            res is Ok ==> final(self).policy().archs@ == old(self).policy().archs@.push(arch),
-            res is Err ==> final(self).policy() == old(self).policy(),
+            final(self).act_no_match == old(self).act_no_match,
+            final(self).act_bad_arch == old(self).act_bad_arch,
+            final(self).rules == old(self).rules,
+            res is Ok ==> final(self).archs@ == old(self).archs@.push(arch),
+            res is Err ==> *final(self) == *old(self),
     {
         let mut i: usize = 0;
-        while i < self.policy.archs.len()
+        while i < self.archs.len()
             invariant
                 self.wf(),
-                i <= self.policy.archs@.len(),
-                forall |k: int| #![trigger self.policy.archs@[k]]
-                    0 <= k < i ==> self.policy.archs@[k] != arch,
-            decreases self.policy.archs@.len() - i
+                i <= self.archs@.len(),
+                forall |k: int| #![trigger self.archs@[k]]
+                    0 <= k < i ==> self.archs@[k] != arch,
+            decreases self.archs@.len() - i
         {
-            if self.policy.archs[i] == arch {
+            if self.archs[i] == arch {
                 return Err(Error::Check(CheckError::DuplicateArch));
             }
             i += 1;
         }
 
-        let mut prospective = self.policy.archs.clone();
+        let mut prospective = self.archs.clone();
         prospective.push(arch);
         let mut r: usize = 0;
-        while r < self.policy.rules.len()
+        while r < self.rules.len()
             invariant
                 self.wf(),
-                prospective@ == self.policy.archs@.push(arch),
-                r <= self.policy.rules@.len(),
+                prospective@ == self.archs@.push(arch),
+                r <= self.rules@.len(),
                 forall |k: int| 0 <= k < r ==>
-                    #[trigger] self.policy.rules@[k].wf(prospective@),
-            decreases self.policy.rules@.len() - r
+                    #[trigger] self.rules@[k].wf(prospective@),
+            decreases self.rules@.len() - r
         {
-            if let Err(err) = self.policy.rules[r].check(prospective.as_slice()) {
+            if let Err(err) = self.rules[r].check(prospective.as_slice()) {
                 return Err(Error::Check(err));
             }
             r += 1;
         }
 
-        let ghost prev = self.policy.archs@;
-        self.policy.archs.push(arch);
+        let ghost prev = self.archs@;
+        self.archs.push(arch);
         proof {
-            assert forall |k: int, l: int| 0 <= k < l < self.policy.archs@.len()
-                implies #[trigger] self.policy.archs@[k] != #[trigger] self.policy.archs@[l] by {
+            assert forall |k: int, l: int| 0 <= k < l < self.archs@.len()
+                implies #[trigger] self.archs@[k] != #[trigger] self.archs@[l] by {
                 if l < prev.len() {
                     assert(prev[k] != prev[l]);
                 } else {
                     assert(prev[k] != arch);
                 }
             }
-            assert forall |k: int| 0 <= k < self.policy.rules@.len()
-                implies #[trigger] self.policy.rules@[k].wf(self.policy.archs@) by {
-                assert(self.policy.rules@[k].wf(prospective@));
+            assert forall |k: int| 0 <= k < self.rules@.len()
+                implies #[trigger] self.rules@[k].wf(self.archs@) by {
+                assert(self.rules@[k].wf(prospective@));
             }
         }
         Ok(())
     }
 
-    /// Adds `rule` after the rules already in this filter.
+    /// Adds `rule` after the rules already in this policy.
     pub fn add(&mut self, rule: Rule) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
-            final(self).policy().archs == old(self).policy().archs,
-            final(self).policy().act_no_match == old(self).policy().act_no_match,
-            final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
-            res is Ok ==> final(self).policy().rules@ == old(self).policy().rules@.push(rule),
-            res is Err ==> final(self).policy() == old(self).policy(),
+            final(self).archs == old(self).archs,
+            final(self).act_no_match == old(self).act_no_match,
+            final(self).act_bad_arch == old(self).act_bad_arch,
+            res is Ok ==> final(self).rules@ == old(self).rules@.push(rule),
+            res is Err ==> *final(self) == *old(self),
     {
-        if let Err(err) = rule.check(self.policy.archs.as_slice()) {
+        if let Err(err) = rule.check(self.archs.as_slice()) {
             return Err(Error::Check(err));
         }
         // NOTE: libseccomp enforces that the action cannot be the default action,
         // but we do not have that restriction.
 
-        let ghost prev = self.policy.rules@;
-        self.policy.rules.push(rule);
+        let ghost prev = self.rules@;
+        self.rules.push(rule);
         proof {
-            assert forall |k: int| 0 <= k < self.policy.rules@.len()
-                implies #[trigger] self.policy.rules@[k].wf(self.policy.archs@) by {
+            assert forall |k: int| 0 <= k < self.rules@.len()
+                implies #[trigger] self.rules@[k].wf(self.archs@) by {
                 if k < prev.len() {
-                    assert(prev[k].wf(self.policy.archs@));
+                    assert(prev[k].wf(self.archs@));
                 }
             }
         }
         Ok(())
     }
 
-    /// Sets the action for syscalls from architectures this filter does not cover.
+    /// Sets the action for syscalls from architectures this policy does not cover.
     pub fn on_bad_arch(&mut self, act: Action) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
-            final(self).policy().archs == old(self).policy().archs,
-            final(self).policy().rules == old(self).policy().rules,
-            final(self).policy().act_no_match == old(self).policy().act_no_match,
-            res is Ok ==> final(self).policy().act_bad_arch == act,
-            res is Err ==> final(self).policy() == old(self).policy(),
+            final(self).archs == old(self).archs,
+            final(self).rules == old(self).rules,
+            final(self).act_no_match == old(self).act_no_match,
+            res is Ok ==> final(self).act_bad_arch == act,
+            res is Err ==> *final(self) == *old(self),
     {
         if let Err(err) = act.check() {
             return Err(Error::Check(err));
         }
-        self.policy.act_bad_arch = act;
+        self.act_bad_arch = act;
         Ok(())
-    }
-
-    /// Skips setting `no_new_privs` during filter installation.
-    pub fn allow_new_privileges(&mut self)
-        ensures
-            final(self).wf() == old(self).wf(),
-            final(self).policy() == old(self).policy(),
-    {
-        self.ctl_nnp = false;
-    }
-
-    /// When installing, set all threads in this process to use the same seccomp filter chain.
-    pub fn enable_thread_sync(&mut self)
-        ensures
-            final(self).wf() == old(self).wf(),
-            final(self).policy() == old(self).policy(),
-    {
-        self.ctl_tsync = true;
-    }
-
-    /// Requests kernel audit records for non-allow actions when installing the filter
-    /// (requires `auditd` and [ausearch(8)](https://man7.org/linux/man-pages/man8/ausearch.8.html) to view logs).
-    pub fn request_audit_logging(&mut self)
-        ensures
-            final(self).wf() == old(self).wf(),
-            final(self).policy() == old(self).policy(),
-    {
-        self.ctl_log = true;
     }
 }
 
@@ -284,8 +228,25 @@ impl Error {
     }
 }
 
+/// Options for installing a policy, named after libseccomp's `SCMP_FLTATR_CTL_*` attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallFlags {
+    /// Set `no_new_privs` before installing the filter.
+    pub ctl_nnp: bool,
+    /// Synchronize the installed filter across all threads.
+    pub ctl_tsync: bool,
+    /// Request logging of all filter actions except `Allow`.
+    pub ctl_log: bool,
+}
+
+impl Default for InstallFlags {
+    fn default() -> InstallFlags {
+        InstallFlags { ctl_nnp: true, ctl_tsync: false, ctl_log: false }
+    }
+}
+
 #[cfg(target_os = "linux")]
-impl Filter {
+impl InstallFlags {
     /// The `SECCOMP_FILTER_FLAG_*` bits in `linux/seccomp.h`.
     const FLAG_TSYNC: u64 = 1 << 0;
     const FLAG_LOG: u64 = 1 << 1;
@@ -301,16 +262,25 @@ impl Filter {
         }
         flags
     }
+}
 
-    /// Compiles this filter and installs it on the calling thread.
+#[cfg(target_os = "linux")]
+impl Policy {
+    /// Compiles this policy and installs it on the calling thread with the default flags.
+    pub fn install(&self) -> Result<(), Error> {
+        self.install_with_flags(InstallFlags::default())
+    }
+
+    /// Compiles this policy and installs it on the calling thread with `flags`.
     #[verifier::external_body]
-    pub fn install(&self) -> Result<(), Error>
-        requires self.wf()
-    {
-        if self.policy.archs.is_empty() {
+    pub fn install_with_flags(&self, flags: InstallFlags) -> Result<(), Error> {
+        if self.archs.is_empty() {
             return Err(Error::NoArch);
         }
-        let program = match self.policy.to_cbpf() {
+        if let Err(err) = self.check() {
+            return Err(Error::Check(err));
+        }
+        let program = match self.to_cbpf() {
             Ok(program) => program,
             Err(err) => return Err(Error::Compile(err)),
         };
@@ -322,7 +292,7 @@ impl Filter {
 
         // `seccomp()` answers EACCES to a thread that holds neither CAP_SYS_ADMIN nor
         // `no_new_privs`, so `ctl_nnp` goes in first.
-        if self.ctl_nnp {
+        if flags.ctl_nnp {
             // SAFETY: PR_SET_NO_NEW_PRIVS takes only scalar arguments and accesses no user buffer.
             let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
             if rc != 0 {
@@ -331,7 +301,7 @@ impl Filter {
         }
 
         let raw = program.assemble();
-        let rc = raw.install_with_flags(self.filter_flags());
+        let rc = raw.install_with_flags(flags.filter_flags());
         if rc != 0 {
             // A thread that refuses TSYNC comes back as its own id rather than as -1,
             // unless `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` is set, which this module leaves off.

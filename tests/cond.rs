@@ -5,11 +5,11 @@ use super::*;
 /// Equality on an `int` argument compares it as a 32-bit signed value.
 #[test]
 fn i32_eq() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which == -1));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which == -1));
     unsafe {
-        filter.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_getpriority, [-2i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
-        filter.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Ok);
+        policy.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_getpriority, [-2i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
+        policy.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Ok);
     }
 }
 
@@ -17,9 +17,9 @@ fn i32_eq() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn i32_high_word() {
-    let minus_one = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which == -1));
-    let negative = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which < 0));
-    let not_minus_one = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which != -1));
+    let minus_one = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which == -1));
+    let negative = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which < 0));
+    let not_minus_one = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which != -1));
     unsafe {
         minus_one.install_and_check(libc::SYS_getpriority, [0xffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
         minus_one.install_and_check(libc::SYS_getpriority, [0x1_ffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
@@ -48,9 +48,9 @@ fn i32_order() {
         (rule!({Expect::DENY} getpriority(which, who) if which < {min as i32}), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
         (rule!({Expect::DENY} getpriority(which, who) if which > {max as i32}), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
     ] {
-        let filter = Filter::new_native_allow(rule);
+        let policy = Policy::new_native_allow(rule);
         for (which, expect) in [i32::MIN as libc::c_long, -1, 0, i32::MAX as libc::c_long].into_iter().zip(expect) {
-            unsafe { filter.install_and_check(libc::SYS_getpriority, [which as libc::c_ulong, 0, 0, 0, 0, 0], expect) };
+            unsafe { policy.install_and_check(libc::SYS_getpriority, [which as libc::c_ulong, 0, 0, 0, 0, 0], expect) };
         }
     }
 }
@@ -58,13 +58,13 @@ fn i32_order() {
 /// Two tests on one argument bound it from both sides.
 #[test]
 fn i32_range() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which >= 0 && which <= 1));
-    let empty = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which > 0 && which < 1));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which >= 0 && which <= 1));
+    let empty = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which > 0 && which < 1));
     unsafe {
-        filter.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
-        filter.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_getpriority, [1, 0, 0, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_getpriority, [3, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
+        policy.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
+        policy.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_getpriority, [1, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_getpriority, [3, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
         empty.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Ok);
         empty.install_and_check(libc::SYS_getpriority, [1, 0, 0, 0, 0, 0], Expect::Ok);
     }
@@ -73,8 +73,8 @@ fn i32_range() {
 /// Masked equality on an `int` argument sees its 32-bit pattern.
 #[test]
 fn i32_masked() {
-    let sign = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which & -0x8000_0000 == -0x8000_0000));
-    let all = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which & -1 == -1));
+    let sign = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which & -0x8000_0000 == -0x8000_0000));
+    let all = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which & -1 == -1));
     unsafe {
         sign.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Denied);
         sign.install_and_check(libc::SYS_getpriority, [i32::MIN as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Denied);
@@ -87,12 +87,12 @@ fn i32_masked() {
 /// Ordering on an `unsigned int` argument puts its top bit above every other value.
 #[test]
 fn u32_order() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd > 0x7fff_ffffu32));
-    let max = Filter::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd >= 0xffff_ffffu32));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd > 0x7fff_ffffu32));
+    let max = Policy::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd >= 0xffff_ffffu32));
     unsafe {
-        filter.install_and_check(libc::SYS_dup, [0x7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_dup, [0x8000_0000, 0, 0, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_dup, [0xffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_dup, [0x7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_dup, [0x8000_0000, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_dup, [0xffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
         max.install_and_check(libc::SYS_dup, [0xffff_fffe, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
         max.install_and_check(libc::SYS_dup, [0xffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
     }
@@ -102,12 +102,12 @@ fn u32_order() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn u32_high_word() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd > 0x7fff_ffffu32));
-    let max = Filter::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd == 0xffff_ffffu32));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd > 0x7fff_ffffu32));
+    let max = Policy::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd == 0xffff_ffffu32));
     unsafe {
-        filter.install_and_check(libc::SYS_dup, [0x1_7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_dup, [0xffff_ffff_7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_dup, [0x1_8000_0000, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_dup, [0x1_7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_dup, [0xffff_ffff_7fff_ffff, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_dup, [0x1_8000_0000, 0, 0, 0, 0, 0], Expect::Denied);
         max.install_and_check(libc::SYS_dup, [libc::c_ulong::MAX, 0, 0, 0, 0, 0], Expect::Denied);
         max.install_and_check(libc::SYS_dup, [0x1234_5678_ffff_ffff, 0, 0, 0, 0, 0], Expect::Denied);
     }
@@ -117,8 +117,8 @@ fn u32_high_word() {
 #[test]
 fn u16_order() {
     let fd = libc::c_ulong::MAX;
-    let above = Filter::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode > 0o7777u16));
-    let special = Filter::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode & 0o7000u16 == 0u16));
+    let above = Policy::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode > 0o7777u16));
+    let special = Policy::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode & 0o7000u16 == 0u16));
     unsafe {
         above.install_and_check(libc::SYS_fchmod, [fd, 0o7777, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
         above.install_and_check(libc::SYS_fchmod, [fd, 0x1_0000, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -135,8 +135,8 @@ fn u16_order() {
 fn iword_order() {
     let fd = libc::c_ulong::MAX;
     let sign: libc::c_ulong = 1 << (libc::c_ulong::BITS - 1);
-    let from_minus_one = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset >= -1isize));
-    let top_bit = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset & {sign as isize} == {sign as isize}));
+    let from_minus_one = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset >= -1isize));
+    let top_bit = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset & {sign as isize} == {sign as isize}));
     for (offset, expect) in [
         (sign, Expect::Errno(libc::EBADF)),
         (-2i64 as libc::c_ulong, Expect::Errno(libc::EBADF)),
@@ -161,12 +161,12 @@ fn iword_order() {
 #[test]
 fn iword_64() {
     let fd = libc::c_ulong::MAX;
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset < 0isize));
-    let low = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0xffff_ffffisize));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset < 0isize));
+    let low = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0xffff_ffffisize));
     unsafe {
-        filter.install_and_check(libc::SYS_lseek, [fd, 0x8000_0000, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_lseek, [fd, 0xffff_ffff, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_lseek, [fd, 0xffff_ffff_0000_0000, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_lseek, [fd, 0x8000_0000, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_lseek, [fd, 0xffff_ffff, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_lseek, [fd, 0xffff_ffff_0000_0000, 0, 0, 0, 0], Expect::Denied);
         low.install_and_check(libc::SYS_lseek, [fd, 0xffff_ffff, 0, 0, 0, 0], Expect::Denied);
         low.install_and_check(libc::SYS_lseek, [fd, libc::c_ulong::MAX, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
     }
@@ -176,10 +176,10 @@ fn iword_64() {
 #[test]
 fn uword_bounds() {
     let max = u64::MAX >> (u64::BITS - libc::c_ulong::BITS);
-    let at_max = Filter::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len >= {max as usize}));
-    let below_max = Filter::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len < {max as usize}));
+    let at_max = Policy::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len >= {max as usize}));
+    let below_max = Policy::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len < {max as usize}));
     let below = max - 1;
-    let exact = Filter::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len & {max as usize} == {below as usize}));
+    let exact = Policy::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if len & {max as usize} == {below as usize}));
     // An unaligned start makes mprotect fail with EINVAL whatever the length.
     unsafe {
         at_max.install_and_check(libc::SYS_mprotect, [1, libc::c_ulong::MAX, 0, 0, 0, 0], Expect::Denied);
@@ -195,9 +195,9 @@ fn uword_bounds() {
 #[test]
 fn ptr() {
     let top = libc::c_ulong::MAX & !0xfff;
-    let null = Filter::new_native_allow(rule!({Expect::DENY} uname(buf) if buf == 0 as ptr));
-    let non_null = Filter::new_native_allow(rule!({Expect::DENY} uname(buf) if buf != 0 as ptr));
-    let aligned = Filter::new_native_allow(rule!({Expect::DENY} uname(buf) if buf as usize & 0xfffusize == 0usize));
+    let null = Policy::new_native_allow(rule!({Expect::DENY} uname(buf) if buf == 0 as ptr));
+    let non_null = Policy::new_native_allow(rule!({Expect::DENY} uname(buf) if buf != 0 as ptr));
+    let aligned = Policy::new_native_allow(rule!({Expect::DENY} uname(buf) if buf as usize & 0xfffusize == 0usize));
     // Neither 0, 1, nor the top page of the address space is mapped, so uname only faults.
     unsafe {
         null.install_and_check(libc::SYS_uname, [0, 0, 0, 0, 0, 0], Expect::Denied);
@@ -213,10 +213,10 @@ fn ptr() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ptr_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} uname(buf) if buf == 0xffff_fffe_0000_0000u64 as ptr));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} uname(buf) if buf == 0xffff_fffe_0000_0000u64 as ptr));
     unsafe {
-        filter.install_and_check(libc::SYS_uname, [0xffff_fffe_0000_0000, 0, 0, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_uname, [0xffff_ffff_0000_0000, 0, 0, 0, 0, 0], Expect::Errno(libc::EFAULT));
+        policy.install_and_check(libc::SYS_uname, [0xffff_fffe_0000_0000, 0, 0, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_uname, [0xffff_ffff_0000_0000, 0, 0, 0, 0, 0], Expect::Errno(libc::EFAULT));
     }
 }
 
@@ -225,17 +225,17 @@ fn ptr_64() {
 fn conds_with_other_rules() {
     let fd = libc::c_ulong::MAX;
     for first in [false, true] {
-        let mut filter = Filter::new_native(Action::Allow).unwrap();
+        let mut policy = Policy::new_native(Action::Allow).unwrap();
         if first {
-            filter.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 7isize)).unwrap();
+            policy.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 7isize)).unwrap();
         }
-        filter.add(rule!(log lseek(fd, offset, whence))).unwrap();
+        policy.add(rule!(log lseek(fd, offset, whence))).unwrap();
         if !first {
-            filter.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 7isize)).unwrap();
+            policy.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 7isize)).unwrap();
         }
         unsafe {
-            filter.install_and_check(libc::SYS_lseek, [fd, 7, 0, 0, 0, 0], Expect::Denied);
-            filter.install_and_check(libc::SYS_lseek, [fd, 8, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+            policy.install_and_check(libc::SYS_lseek, [fd, 7, 0, 0, 0, 0], Expect::Denied);
+            policy.install_and_check(libc::SYS_lseek, [fd, 8, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
         }
     }
 }
@@ -245,11 +245,11 @@ fn conds_with_other_rules() {
 #[test]
 fn wide_args_64() {
     let fd = libc::c_ulong::MAX;
-    let pread = Filter::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
-    let readahead = Filter::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
-    let fallocate = Filter::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
-    let sync = Filter::new_native_allow(rule!({Expect::DENY} sync_file_range(fd, offset, nbytes, flags) if offset == 0x1_0000_0002i64 && flags == 7u32));
-    let fadvise = Filter::new_native_allow(rule!({Expect::DENY} fadvise64(fd, offset, len, advice) if offset == 0x1_0000_0002i64 && advice == 4));
+    let pread = Policy::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
+    let readahead = Policy::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
+    let fallocate = Policy::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
+    let sync = Policy::new_native_allow(rule!({Expect::DENY} sync_file_range(fd, offset, nbytes, flags) if offset == 0x1_0000_0002i64 && flags == 7u32));
+    let fadvise = Policy::new_native_allow(rule!({Expect::DENY} fadvise64(fd, offset, len, advice) if offset == 0x1_0000_0002i64 && advice == 4));
     unsafe {
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 0x1_0000_0002, 0, 0], Expect::Denied);
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 2, 1, 0], Expect::Errno(libc::EBADF));
@@ -269,9 +269,9 @@ fn wide_args_64() {
 #[test]
 fn x86_wide_args() {
     let fd = libc::c_ulong::MAX;
-    let pread = Filter::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
-    let readahead = Filter::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
-    let fallocate = Filter::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
+    let pread = Policy::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
+    let readahead = Policy::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
+    let fallocate = Policy::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
     unsafe {
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 2, 1, 0], Expect::Denied);
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 2, 1, 9], Expect::Denied);
@@ -289,9 +289,9 @@ fn x86_wide_args() {
 #[test]
 fn x86_sixth_slot() {
     let fd = libc::c_ulong::MAX;
-    let sync = Filter::new_native_allow(rule!({Expect::DENY} sync_file_range(fd, offset, nbytes, flags) if nbytes == 0x1_0000_0002i64 && flags == 7u32));
-    let fadvise64_64 = Filter::new_native_allow(rule!({Expect::DENY} fadvise64_64(fd, offset, len, advice) if advice == 4));
-    let fadvise64 = Filter::new_native_allow(rule!({Expect::DENY} fadvise64(fd, offset, len, advice) if len == 5usize && advice == 4));
+    let sync = Policy::new_native_allow(rule!({Expect::DENY} sync_file_range(fd, offset, nbytes, flags) if nbytes == 0x1_0000_0002i64 && flags == 7u32));
+    let fadvise64_64 = Policy::new_native_allow(rule!({Expect::DENY} fadvise64_64(fd, offset, len, advice) if advice == 4));
+    let fadvise64 = Policy::new_native_allow(rule!({Expect::DENY} fadvise64(fd, offset, len, advice) if len == 5usize && advice == 4));
     unsafe {
         sync.install_and_check(libc::SYS_sync_file_range, [fd, 0, 0, 2, 1, 7], Expect::Denied);
         sync.install_and_check(libc::SYS_sync_file_range, [fd, 0, 0, 2, 1, 0], Expect::Errno(libc::EBADF));
@@ -308,12 +308,12 @@ fn x86_sixth_slot() {
 #[test]
 fn x86_wide_signed() {
     let fd = libc::c_ulong::MAX;
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} ftruncate64(fd, length) if length < 0i64));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} ftruncate64(fd, length) if length < 0i64));
     unsafe {
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0x8000_0000, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0xffff_ffff, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0xffff_ffff, 0x7fff_ffff, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0x8000_0000, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0xffff_ffff, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0xffff_ffff, 0x7fff_ffff, 0, 0, 0], Expect::Errno(libc::EBADF));
     }
 }
 
@@ -322,9 +322,9 @@ fn x86_wide_signed() {
 #[test]
 fn arm_wide_args() {
     let fd = libc::c_ulong::MAX;
-    let pread = Filter::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
-    let readahead = Filter::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
-    let fallocate = Filter::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
+    let pread = Policy::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
+    let readahead = Policy::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 3usize));
+    let fallocate = Policy::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
     unsafe {
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 0, 2, 1], Expect::Denied);
         pread.install_and_check(libc::SYS_pread64, [fd, 0, 0, 0xdead, 2, 1], Expect::Denied);
@@ -345,8 +345,8 @@ fn arm_reordered() {
     // The numbers in `arch/arm/tools/syscall.tbl`, which `libc` does not define.
     let arm_fadvise64_64: libc::c_long = 270;
     let sync_file_range2: libc::c_long = 341;
-    let fadvise = Filter::new_native_allow(rule!({Expect::DENY} arm_fadvise64_64(fd, advice, offset, len) if advice == 4 && len == 0x1_0000_0002i64));
-    let sync = Filter::new_native_allow(rule!({Expect::DENY} arm_sync_file_range(fd, flags, offset, nbytes) if flags == 7u32 && nbytes == 0x1_0000_0002i64));
+    let fadvise = Policy::new_native_allow(rule!({Expect::DENY} arm_fadvise64_64(fd, advice, offset, len) if advice == 4 && len == 0x1_0000_0002i64));
+    let sync = Policy::new_native_allow(rule!({Expect::DENY} arm_sync_file_range(fd, flags, offset, nbytes) if flags == 7u32 && nbytes == 0x1_0000_0002i64));
     unsafe {
         fadvise.install_and_check(arm_fadvise64_64, [fd, 4, 0, 0, 2, 1], Expect::Denied);
         fadvise.install_and_check(arm_fadvise64_64, [fd, 0, 0, 0, 2, 1], Expect::Errno(libc::EBADF));
@@ -361,22 +361,22 @@ fn arm_reordered() {
 #[test]
 fn arm_wide_signed() {
     let fd = libc::c_ulong::MAX;
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} ftruncate64(fd, length) if length < 0i64));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} ftruncate64(fd, length) if length < 0i64));
     unsafe {
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0, 0x8000_0000, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0, 0xffff_ffff, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Errno(libc::EBADF));
-        filter.install_and_check(libc::SYS_ftruncate64, [fd, 0x8000_0000, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0, 0x8000_0000, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0, 0xffff_ffff, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_ftruncate64, [fd, 0x8000_0000, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
     }
 }
 
 /// An offset libc's `pread64` splits into words meets a test on the whole offset.
 #[test]
 fn libc_pread64() {
-    let exact = Filter::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
-    let negative = Filter::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset < 0i64));
+    let exact = Policy::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset == 0x1_0000_0002i64));
+    let negative = Policy::new_native_allow(rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset < 0i64));
     let ebadf = Expect::Errno(libc::EBADF);
-    for (filter, offset, expect) in [
+    for (policy, offset, expect) in [
         (&exact, 0x1_0000_0002, Expect::Denied),
         (&exact, 0x2, ebadf),
         (&exact, 0x1_0000_0000, ebadf),
@@ -388,7 +388,7 @@ fn libc_pread64() {
         (&negative, i64::MAX, ebadf),
     ] {
         let call = || (unsafe { libc::pread64(-1, std::ptr::null_mut(), 0, offset) } as _, Expect::errno());
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "pread64 at {offset:#x} should come back as {expect:?} under {filter:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "pread64 at {offset:#x} should come back as {expect:?} under {policy:?}");
     }
 }
 
@@ -396,10 +396,10 @@ fn libc_pread64() {
 #[test]
 fn libc_ftruncate64() {
     let syscall = if cfg!(target_pointer_width = "64") { Syscall::Ftruncate } else { Syscall::Ftruncate64 };
-    let exact = Filter::new_native_allow(rule!({Expect::DENY} {syscall}(fd, length) if length == 0x1_0000_0002i64));
-    let negative = Filter::new_native_allow(rule!({Expect::DENY} {syscall}(fd, length) if length < 0i64));
+    let exact = Policy::new_native_allow(rule!({Expect::DENY} {syscall}(fd, length) if length == 0x1_0000_0002i64));
+    let negative = Policy::new_native_allow(rule!({Expect::DENY} {syscall}(fd, length) if length < 0i64));
     let ebadf = Expect::Errno(libc::EBADF);
-    for (filter, length, expect) in [
+    for (policy, length, expect) in [
         (&exact, 0x1_0000_0002, Expect::Denied),
         (&exact, 0x2, ebadf),
         (&exact, 0x2_0000_0001, ebadf),
@@ -409,14 +409,14 @@ fn libc_ftruncate64() {
         (&negative, 0x1_0000_0000, ebadf),
     ] {
         let call = || (unsafe { libc::ftruncate64(-1, length) } as _, Expect::errno());
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "ftruncate64 to {length:#x} should come back as {expect:?} under {filter:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "ftruncate64 to {length:#x} should come back as {expect:?} under {policy:?}");
     }
 }
 
 /// libc's `readahead` passes a split offset and the count after it where the filter tests them.
 #[test]
 fn libc_readahead() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 7usize));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} readahead(fd, offset, count) if offset == 0x1_0000_0002i64 && count == 7usize));
     let ebadf = Expect::Errno(libc::EBADF);
     for (offset, count, expect) in [
         (0x1_0000_0002, 7, Expect::Denied),
@@ -425,14 +425,14 @@ fn libc_readahead() {
         (0x1_0000_0002, 0, ebadf),
     ] {
         let call = || (unsafe { libc::readahead(-1, offset, count) } as _, Expect::errno());
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "readahead({offset:#x}, {count}) should come back as {expect:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "readahead({offset:#x}, {count}) should come back as {expect:?}");
     }
 }
 
 /// libc's `fallocate64` passes its mode and two split values where the filter tests them.
 #[test]
 fn libc_fallocate64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} fallocate(fd, mode, offset, len) if mode == 1 && offset == 0x1_0000_0002i64 && len == 0x3_0000_0004i64));
     let ebadf = Expect::Errno(libc::EBADF);
     for (mode, offset, len, expect) in [
         (1, 0x1_0000_0002, 0x3_0000_0004, Expect::Denied),
@@ -443,7 +443,7 @@ fn libc_fallocate64() {
         (1, 0x1_0000_0002, 0x4, ebadf),
     ] {
         let call = || (unsafe { libc::fallocate64(-1, mode, offset, len) } as _, Expect::errno());
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "fallocate64({mode}, {offset:#x}, {len:#x}) should come back as {expect:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "fallocate64({mode}, {offset:#x}, {len:#x}) should come back as {expect:?}");
     }
 }
 
@@ -455,7 +455,7 @@ fn libc_sync_file_range() {
     } else {
         (Syscall::SyncFileRange, 3, 1, 2)
     };
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} {syscall}() if {Expr::Var(flags_arg)} == 2u32 && {Expr::Var(offset_arg)} == 0x1_0000_0002i64 && {Expr::Var(nbytes_arg)} == 0x3_0000_0004i64));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} {syscall}() if {Expr::Var(flags_arg)} == 2u32 && {Expr::Var(offset_arg)} == 0x1_0000_0002i64 && {Expr::Var(nbytes_arg)} == 0x3_0000_0004i64));
     let ebadf = Expect::Errno(libc::EBADF);
     for (offset, nbytes, flags, expect) in [
         (0x1_0000_0002, 0x3_0000_0004, 2, Expect::Denied),
@@ -465,7 +465,7 @@ fn libc_sync_file_range() {
         (0x1_0000_0002, 0x4_0000_0003, 2, ebadf),
     ] {
         let call = || (unsafe { libc::sync_file_range(-1, offset, nbytes, flags) } as _, Expect::errno());
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "sync_file_range({offset:#x}, {nbytes:#x}, {flags}) should come back as {expect:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "sync_file_range({offset:#x}, {nbytes:#x}, {flags}) should come back as {expect:?}");
     }
 }
 
@@ -481,7 +481,7 @@ fn libc_posix_fadvise64() {
     };
     // `fadvise64` on x86_64 takes its length as a `size_t`, the others as a `loff_t`.
     let len_ty = syscall.signature(Arch::native().unwrap())[len_arg as usize];
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} {syscall}() if {Expr::Var(advice_arg)} == 4 && {Expr::Var(offset_arg)} == 0x1_0000_0002i64 && {Expr::Var(len_arg)} == 0x3_0000_0004u64 as len_ty));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} {syscall}() if {Expr::Var(advice_arg)} == 4 && {Expr::Var(offset_arg)} == 0x1_0000_0002i64 && {Expr::Var(len_arg)} == 0x3_0000_0004u64 as len_ty));
     let ebadf = Expect::Errno(libc::EBADF);
     for (offset, len, advice, expect) in [
         (0x1_0000_0002, 0x3_0000_0004, 4, Expect::Denied),
@@ -495,7 +495,7 @@ fn libc_posix_fadvise64() {
             0 => (0, 0),
             err => (-1, err),
         };
-        assert!(expect.matches(unsafe { filter.install_and_run(call) }), "posix_fadvise64({offset:#x}, {len:#x}, {advice}) should come back as {expect:?}");
+        assert!(expect.matches(unsafe { policy.install_and_run(call) }), "posix_fadvise64({offset:#x}, {len:#x}, {advice}) should come back as {expect:?}");
     }
 }
 
@@ -679,8 +679,8 @@ fn signatures() {
 /// Arithmetic on arguments wraps around at their type.
 #[test]
 fn arith() {
-    let plus_one = Filter::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which + 1 == 0));
-    let minus_one = Filter::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd - 1u32 > 0xffff_fff0u32));
+    let plus_one = Policy::new_native_allow(rule!({Expect::DENY} getpriority(which, who) if which + 1 == 0));
+    let minus_one = Policy::new_native_allow(rule!({Expect::DENY} dup(oldfd) if oldfd - 1u32 > 0xffff_fff0u32));
     unsafe {
         plus_one.install_and_check(libc::SYS_getpriority, [-1i64 as libc::c_ulong, 0, 0, 0, 0, 0], Expect::Denied);
         plus_one.install_and_check(libc::SYS_getpriority, [0, 0, 0, 0, 0, 0], Expect::Ok);
@@ -693,8 +693,8 @@ fn arith() {
 #[test]
 fn cast() {
     let fd = libc::c_ulong::MAX;
-    let low_byte = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset as u8 == 0x44u8));
-    let negative_short = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset as i16 < 0i16));
+    let low_byte = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset as u8 == 0x44u8));
+    let negative_short = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset as i16 < 0i16));
     unsafe {
         low_byte.install_and_check(libc::SYS_lseek, [fd, 0x144, 0, 0, 0, 0], Expect::Denied);
         low_byte.install_and_check(libc::SYS_lseek, [fd, 0x45, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -707,10 +707,10 @@ fn cast() {
 /// Two arguments compare with each other.
 #[test]
 fn arg_pair() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if fd < whence));
+    let policy = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if fd < whence));
     unsafe {
-        filter.install_and_check(libc::SYS_lseek, [3, 0, 4, 0, 0, 0], Expect::Denied);
-        filter.install_and_check(libc::SYS_lseek, [libc::c_ulong::MAX, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
+        policy.install_and_check(libc::SYS_lseek, [3, 0, 4, 0, 0, 0], Expect::Denied);
+        policy.install_and_check(libc::SYS_lseek, [libc::c_ulong::MAX, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
     }
 }
 
@@ -718,11 +718,11 @@ fn arg_pair() {
 #[test]
 fn literal_types() {
     for ty in [I(32), I(16), I(64), U(16), U(8)] {
-        assert!(Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which < 1 as ty)).is_ok(), "{ty:?}");
+        assert!(Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which < 1 as ty)).is_ok(), "{ty:?}");
     }
     for ty in [U(32), U(64), Ptr] {
         assert!(matches!(
-            Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which == 1 as ty)),
+            Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which == 1 as ty)),
             Err(Error::Check(CheckError::CmpTypes {
                 op: CmpOp::Eq, lhs: I(32), rhs,
             })) if rhs == ty,
@@ -740,10 +740,10 @@ fn unsigned_types() {
     ] {
         let archs = [Arch::X86, Arch::Arm];
         for lty in [ty, U(64), I(64)] {
-            assert!(Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}() if {Expr::Var(i)} >= 0xffff as lty)).is_ok(), "{syscall:?} {lty:?}");
+            assert!(Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}() if {Expr::Var(i)} >= 0xffff as lty)).is_ok(), "{syscall:?} {lty:?}");
         }
         assert!(matches!(
-            Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}() if {Expr::Var(i)} <= 1 as signed)),
+            Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}() if {Expr::Var(i)} <= 1 as signed)),
             Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Le, lhs, rhs, .. })) if lhs == ty && rhs == signed,
         ), "{syscall:?}");
     }
@@ -755,21 +755,21 @@ fn unsigned_types() {
 fn word_types() {
     // `off_t` is a signed word, which a `u32` fits only where the word is wider.
     let above = rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32);
-    assert!(Filter::with_rule(&[Arch::X86_64, Arch::Aarch64], above.clone()).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86_64, Arch::Aarch64], above.clone()).is_ok());
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86_64, Arch::X86], above),
+        Policy::with_rule(&[Arch::X86_64, Arch::X86], above),
         Err(Error::Check(CheckError::CmpTypes { lhs: IWord, rhs: U(32), .. })),
     ));
-    assert!(Filter::with_rule(&[Arch::X86_64, Arch::X86], rule!({Expect::DENY} lseek(fd, offset, whence) if offset == -0x8000_0000)).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86_64, Arch::X86], rule!({Expect::DENY} lseek(fd, offset, whence) if offset == -0x8000_0000)).is_ok());
     // A word converts both ways with the fixed-width type of its size.
-    assert!(Filter::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} mprotect(addr, len, prot) if len == 0xffff_ffff_ffff_ffffu64)).is_ok());
-    assert!(Filter::with_rule(&[Arch::Arm], rule!({Expect::DENY} mprotect(addr, len, prot) if len == 0xffff_ffffu32)).is_ok());
+    assert!(Policy::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} mprotect(addr, len, prot) if len == 0xffff_ffff_ffff_ffffu64)).is_ok());
+    assert!(Policy::with_rule(&[Arch::Arm], rule!({Expect::DENY} mprotect(addr, len, prot) if len == 0xffff_ffffu32)).is_ok());
     // A pointer compares only with a pointer.
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf != 0usize)),
+        Policy::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf != 0usize)),
         Err(Error::Check(CheckError::CmpTypes { lhs: Ptr, rhs: UWord, .. })),
     ));
-    assert!(Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} uname(buf) if buf != -1 as ptr)).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} uname(buf) if buf != -1 as ptr)).is_ok());
 }
 
 /// A 64-bit argument takes 64-bit constants and narrower ones, even on a 32-bit architecture.
@@ -777,28 +777,28 @@ fn word_types() {
 fn wide_types() {
     let all = [Arch::X86, Arch::X86_64, Arch::Arm, Arch::Aarch64];
     for ty in [I(64), IWord, I(32), U(32)] {
-        assert!(Filter::with_rule(&all, rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset < 1 as ty)).is_ok(), "{ty:?}");
+        assert!(Policy::with_rule(&all, rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset < 1 as ty)).is_ok(), "{ty:?}");
     }
     let range = rule!({Expect::DENY} fallocate(fd, mode, offset, len) if offset >= 0x8000_0000i64 && len <= -1i64);
-    assert!(Filter::with_rule(&all, range).is_ok());
-    assert!(Filter::with_rule(&[Arch::X86, Arch::Arm], rule!({Expect::DENY} fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname) if mask > 0x1_0000_0000u64)).is_ok());
-    assert!(Filter::with_rule(&[Arch::Arm], rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset & -1i64 == 0x1_0000_0000i64)).is_ok());
+    assert!(Policy::with_rule(&all, range).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86, Arch::Arm], rule!({Expect::DENY} fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname) if mask > 0x1_0000_0000u64)).is_ok());
+    assert!(Policy::with_rule(&[Arch::Arm], rule!({Expect::DENY} pread64(fd, buf, count, offset) if offset & -1i64 == 0x1_0000_0000i64)).is_ok());
 }
 
 /// A mask must have the argument's own type, since bitwise operations do not convert.
 #[test]
 fn mask_types() {
-    assert!(Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which & -1 == -0x8000_0000)).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which & -1 == -0x8000_0000)).is_ok());
     for ty in [U(32), I(64), I(16)] {
         assert!(matches!(
-            Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which & 0xff as ty == 0)),
+            Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} getpriority(which, who) if which & 0xff as ty == 0)),
             Err(Error::Check(CheckError::BinOpTypes { op: BinOp::And, lhs: I(32), rhs, .. })) if rhs == ty,
         ), "{ty:?}");
     }
     // A word and a fixed-width type of its size are distinct types.
-    assert!(Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} lseek(fd, offset, whence) if offset & -1isize == -1isize)).is_ok());
+    assert!(Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} lseek(fd, offset, whence) if offset & -1isize == -1isize)).is_ok());
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86_64], rule!({Expect::DENY} lseek(fd, offset, whence) if offset & -1i64 == 0i64)),
+        Policy::with_rule(&[Arch::X86_64], rule!({Expect::DENY} lseek(fd, offset, whence) if offset & -1i64 == 0i64)),
         Err(Error::Check(CheckError::BinOpTypes { lhs: IWord, rhs: I(64), .. })),
     ));
 }
@@ -813,17 +813,17 @@ fn ptr_ops() {
         (rule!({Expect::DENY} uname(buf) if buf >= 0 as ptr), rule!({Expect::DENY} read(fd, buf, count) if fd >= 0u32 && count >= 0usize)),
     ] {
         assert!(matches!(
-            Filter::with_rule(&[Arch::X86_64], on_ptr),
+            Policy::with_rule(&[Arch::X86_64], on_ptr),
             Err(Error::Check(CheckError::CmpTypes { lhs: Ptr, rhs: Ptr, .. })),
         ));
-        assert!(Filter::with_rule(&[Arch::X86_64], on_ints).is_ok());
+        assert!(Policy::with_rule(&[Arch::X86_64], on_ints).is_ok());
     }
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf & 0xfff as ptr == 0 as ptr)),
+        Policy::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf & 0xfff as ptr == 0 as ptr)),
         Err(Error::Check(CheckError::BinOpTypes { op: BinOp::And, lhs: Ptr, rhs: Ptr, .. })),
     ));
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf + 1 as ptr == 0 as ptr)),
+        Policy::with_rule(&[Arch::X86], rule!({Expect::DENY} uname(buf) if buf + 1 as ptr == 0 as ptr)),
         Err(Error::Check(CheckError::BinOpTypes { op: BinOp::Add, lhs: Ptr, rhs: Ptr, .. })),
     ));
     for rule in [
@@ -831,7 +831,7 @@ fn ptr_ops() {
         rule!({Expect::DENY} uname(buf) if buf != 0 as ptr),
         rule!({Expect::DENY} uname(buf) if buf as usize & 0xfffusize == 0usize),
     ] {
-        assert!(Filter::with_rule(&[Arch::X86], rule).is_ok());
+        assert!(Policy::with_rule(&[Arch::X86], rule).is_ok());
     }
 }
 
@@ -846,9 +846,9 @@ fn arg_count() {
         (Syscall::SyncFileRange, Arch::X86, 4),
         (Syscall::Uname, Arch::Aarch64, 1),
     ] {
-        assert!(Filter::with_rule(&[arch], rule!({Expect::DENY} {syscall}() if {Expr::Var(total - 1)} == {Expr::Var(total - 1)})).is_ok(), "{syscall:?}");
+        assert!(Policy::with_rule(&[arch], rule!({Expect::DENY} {syscall}() if {Expr::Var(total - 1)} == {Expr::Var(total - 1)})).is_ok(), "{syscall:?}");
         assert!(matches!(
-            Filter::with_rule(&[arch], rule!({Expect::DENY} {syscall}() if {Expr::Var(total)} == {Expr::Var(total)})),
+            Policy::with_rule(&[arch], rule!({Expect::DENY} {syscall}() if {Expr::Var(total)} == {Expr::Var(total)})),
             Err(Error::Check(CheckError::InvalidArg { given, total: t })) if given == total && t == total,
         ), "{syscall:?}");
     }
@@ -857,17 +857,17 @@ fn arg_count() {
 /// A syscall an enabled architecture lacks takes a rule, but no argument tests.
 #[test]
 fn absent_syscall_rule() {
-    assert!(Filter::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode))).is_ok());
+    assert!(Policy::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode))).is_ok());
     assert!(matches!(
-        Filter::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
+        Policy::with_rule(&[Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86_64, Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
+        Policy::with_rule(&[Arch::X86_64, Arch::Aarch64], rule!({Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
         Err(Error::Check(CheckError::IncompatSigs)),
     ));
     assert!(matches!(
-        Filter::with_rule(&[Arch::X86, Arch::Arm], rule!({Expect::DENY} mmap(addr, length, prot, flags, fd, offset) if addr == addr)),
+        Policy::with_rule(&[Arch::X86, Arch::Arm], rule!({Expect::DENY} mmap(addr, length, prot, flags, fd, offset) if addr == addr)),
         Err(Error::Check(CheckError::IncompatSigs)),
     ));
 }
@@ -883,9 +883,9 @@ fn incompat_sigs() {
         (Syscall::Fadvise64, [Arch::X86_64, Arch::Aarch64]),
         (Syscall::Chown32, [Arch::Arm, Arch::X86_64]),
     ] {
-        assert!(Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}())).is_ok(), "{syscall:?}");
+        assert!(Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}())).is_ok(), "{syscall:?}");
         assert!(matches!(
-            Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}() if @0 == @0)),
+            Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}() if @0 == @0)),
             Err(Error::Check(CheckError::IncompatSigs)),
         ), "{syscall:?}");
     }
@@ -895,7 +895,7 @@ fn incompat_sigs() {
         (Syscall::Fadvise64, [Arch::X86, Arch::X86_64]),
         (Syscall::Pread64, [Arch::X86, Arch::Aarch64]),
     ] {
-        assert!(Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}() if @0 == @0)).is_ok(), "{syscall:?}");
+        assert!(Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}() if @0 == @0)).is_ok(), "{syscall:?}");
     }
 }
 
@@ -907,56 +907,56 @@ fn incompat_sigs_on_archs() {
         (Syscall::Chown, [Arch::X86, Arch::X86_64]),
         (Syscall::Setresuid, [Arch::Arm, Arch::Aarch64]),
     ] {
-        let mut filter = Filter::with_rule(&archs, rule!({Expect::DENY} {syscall}())).unwrap();
-        filter.add(rule!([{archs[0]}] {Expect::DENY} {syscall}() if @0 == @0)).unwrap();
-        filter.add(rule!([{archs[1]}] {Expect::DENY} exact {syscall}() if @0 == @0)).unwrap();
+        let mut policy = Policy::with_rule(&archs, rule!({Expect::DENY} {syscall}())).unwrap();
+        policy.add(rule!([{archs[0]}] {Expect::DENY} {syscall}() if @0 == @0)).unwrap();
+        policy.add(rule!([{archs[1]}] {Expect::DENY} exact {syscall}() if @0 == @0)).unwrap();
         assert!(matches!(
-            filter.add(rule!([{archs[0]}, {archs[1]}] {Expect::DENY} {syscall}() if @0 == @0)),
+            policy.add(rule!([{archs[0]}, {archs[1]}] {Expect::DENY} {syscall}() if @0 == @0)),
             Err(Error::Check(CheckError::IncompatSigs)),
         ), "{syscall:?}");
     }
-    let mut filter = Filter::with_rule(&[Arch::X86_64, Arch::Aarch64], rule!({Expect::DENY} getpid())).unwrap();
+    let mut policy = Policy::with_rule(&[Arch::X86_64, Arch::Aarch64], rule!({Expect::DENY} getpid())).unwrap();
     assert!(matches!(
-        filter.add(rule!([aarch64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
+        policy.add(rule!([aarch64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
-    filter.add(rule!([x86_64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)).unwrap();
+    policy.add(rule!([x86_64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)).unwrap();
 }
 
 /// Adding an architecture leaves alone the rules limited to other architectures.
 #[test]
 fn add_arch_skips_limited_rules() {
-    let mut filter = Filter::with_rule(&[Arch::X86], rule!({Expect::DENY} getpid())).unwrap();
-    filter.add(rule!([x86] {Expect::DENY} chown(pathname, owner, group) if owner == 0u16)).unwrap();
-    filter.add_arch(Arch::X86_64).unwrap();
+    let mut policy = Policy::with_rule(&[Arch::X86], rule!({Expect::DENY} getpid())).unwrap();
+    policy.add(rule!([x86] {Expect::DENY} chown(pathname, owner, group) if owner == 0u16)).unwrap();
+    policy.add_arch(Arch::X86_64).unwrap();
 }
 
-/// Adding an architecture rechecks the argument tests already in the filter.
+/// Adding an architecture rechecks the argument tests already in the policy.
 #[test]
 fn add_arch_rechecks() {
-    let mut filter = Filter::with_rule(&[Arch::X86], rule!({Expect::DENY} chown(pathname, owner, group) if owner == 0u16)).unwrap();
-    assert!(matches!(filter.add_arch(Arch::X86_64), Err(Error::Check(CheckError::IncompatSigs))));
-    filter.add_arch(Arch::Arm).unwrap();
+    let mut policy = Policy::with_rule(&[Arch::X86], rule!({Expect::DENY} chown(pathname, owner, group) if owner == 0u16)).unwrap();
+    assert!(matches!(policy.add_arch(Arch::X86_64), Err(Error::Check(CheckError::IncompatSigs))));
+    policy.add_arch(Arch::Arm).unwrap();
 
-    let mut filter = Filter::with_rule(&[], rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32)).unwrap();
-    filter.add_arch(Arch::X86_64).unwrap();
+    let mut policy = Policy::with_rule(&[], rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32)).unwrap();
+    policy.add_arch(Arch::X86_64).unwrap();
     assert!(matches!(
-        filter.add_arch(Arch::X86),
+        policy.add_arch(Arch::X86),
         Err(Error::Check(CheckError::CmpTypes { lhs: IWord, rhs: U(32), .. })),
     ));
-    filter.add_arch(Arch::Aarch64).unwrap();
+    policy.add_arch(Arch::Aarch64).unwrap();
 }
 
 /// Multiplexed syscalls take argument tests only in exact rules.
 #[test]
 fn mux_conds() {
     for syscall in [Syscall::Socket, Syscall::Accept4, Syscall::Semget, Syscall::Shmat] {
-        let mut filter = Filter::new_native(Action::Allow).unwrap();
+        let mut policy = Policy::new_native(Action::Allow).unwrap();
         assert!(matches!(
-            filter.add(rule!({Expect::DENY} {syscall}() if @0 == @0)),
+            policy.add(rule!({Expect::DENY} {syscall}() if @0 == @0)),
             Err(Error::Check(CheckError::InvalidMuxConditions)),
         ), "{syscall:?}");
-        filter.add(rule!({Expect::DENY} {syscall}())).unwrap();
-        filter.add(rule!({Expect::DENY} exact {syscall}() if @0 == @0)).unwrap();
+        policy.add(rule!({Expect::DENY} {syscall}())).unwrap();
+        policy.add(rule!({Expect::DENY} exact {syscall}() if @0 == @0)).unwrap();
     }
 }

@@ -21,17 +21,17 @@ use seacomb::*;
 use std::io::Write;
 
 // Allow any syscall when no rule matches.
-let mut filter = Filter::new_native(Action::Allow).unwrap();
+let mut policy = Policy::new_native(Action::Allow).unwrap();
 
 // Make write to stderr (fd 2) fail with EPERM.
-filter.add(rule!(errno(1) write(fd, buf, count) if fd == 2u32)).unwrap();
+policy.add(rule!(errno(1) write(fd, buf, count) if fd == 2u32)).unwrap();
 
 // Kill the process on execve.
-filter.add(rule!(kill process execve(pathname, argv, envp))).unwrap();
+policy.add(rule!(kill process execve(pathname, argv, envp))).unwrap();
 
 #[cfg(target_os = "linux")]
 {
-    filter.install().unwrap();
+    policy.install().unwrap();
 
     assert!(std::io::stdout().write_all(b"Hello from stdout!\n").is_ok());
     let err = std::io::stderr().write_all(b"Hello from stderr!\n").unwrap_err();
@@ -103,7 +103,7 @@ properties like panic-freedom and termination, but they are not verified to be f
 or lacking formal specs.
 The assembler in `src/asm.rs` is an example, which is used for converting an AST of cBPF program
 to actual binary formats used by the kernel.
-The actual installaion of the policies (`Filter::install` and `RawProgram::install_with_flags`)
+The actual installaion of the policies (`Policy::install_with_flags` and `RawProgram::install_with_flags`)
 is also not verified and marked `unsafe` since it requires low-level syscalls.
 
 ## Related work

@@ -195,36 +195,56 @@ impl Cond {
     }
 }
 
+impl Arch {
+    /// Checks that no architecture appears twice in `archs`.
+    fn check_distinct(archs: &[Arch]) -> (res: Result<(), CheckError>)
+        ensures res is Ok ==> forall |k: int, l: int| #![trigger archs@[k], archs@[l]]
+            0 <= k < l < archs@.len() ==> archs@[k] != archs@[l]
+    {
+        let mut i: usize = 0;
+        while i < archs.len()
+            invariant
+                i <= archs@.len(),
+                forall |k: int, l: int| #![trigger archs@[k], archs@[l]]
+                    0 <= k < l < i ==> archs@[k] != archs@[l],
+            decreases archs@.len() - i
+        {
+            let arch = archs[i];
+            let mut j: usize = 0;
+            while j < i
+                invariant
+                    i < archs@.len(),
+                    arch == archs@[i as int],
+                    j <= i,
+                    forall |k: int| 0 <= k < j ==> #[trigger] archs@[k] != arch,
+                decreases i - j
+            {
+                if archs[j] == arch {
+                    return Err(CheckError::DuplicateArch);
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+}
+
 impl Rule {
     /// Checks the rule against every enabled architecture.
     pub(crate) fn check(&self, archs: &[Arch]) -> (res: Result<(), CheckError>)
         ensures res is Ok ==> self.wf(archs@)
     {
         self.action.check()?;
+        Arch::check_distinct(self.archs.as_slice())?;
         let mut i: usize = 0;
         while i < self.archs.len()
             invariant
                 i <= self.archs@.len(),
-                forall |k: int, l: int| #![trigger self.archs@[k], self.archs@[l]]
-                    0 <= k < l < i ==> self.archs@[k] != self.archs@[l],
                 forall |k: int| 0 <= k < i ==> archs@.contains(#[trigger] self.archs@[k]),
             decreases self.archs@.len() - i
         {
             let arch = self.archs[i];
-            let mut j: usize = 0;
-            while j < i
-                invariant
-                    i < self.archs@.len(),
-                    arch == self.archs@[i as int],
-                    j <= i,
-                    forall |k: int| 0 <= k < j ==> #[trigger] self.archs@[k] != arch,
-                decreases i - j
-            {
-                if self.archs[j] == arch {
-                    return Err(CheckError::DuplicateArch);
-                }
-                j += 1;
-            }
             let mut j: usize = 0;
             while j < archs.len() && archs[j] != arch
                 invariant
@@ -317,6 +337,29 @@ impl Rule {
                     assert(self.syscall.spec_signature(archs@[l]) =~= first@);
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+impl Policy {
+    /// Checks the policy's actions, its architectures, and every rule against them.
+    #[cfg_attr(not(target_os = "linux"), allow(unused))]
+    pub(crate) fn check(&self) -> (res: Result<(), CheckError>)
+        ensures res is Ok ==> self.wf()
+    {
+        self.act_no_match.check()?;
+        self.act_bad_arch.check()?;
+        Arch::check_distinct(self.archs.as_slice())?;
+        let mut r: usize = 0;
+        while r < self.rules.len()
+            invariant
+                r <= self.rules@.len(),
+                forall |k: int| 0 <= k < r ==> #[trigger] self.rules@[k].wf(self.archs@),
+            decreases self.rules@.len() - r
+        {
+            self.rules[r].check(self.archs.as_slice())?;
+            r += 1;
         }
         Ok(())
     }
