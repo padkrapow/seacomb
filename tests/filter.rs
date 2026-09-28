@@ -42,8 +42,8 @@ fn failed_add_keeps_rules() {
     ));
     for rule in [
         rule!(errno(4096) getppid()),
-        rule!(errno(8) getppid() when {Expr::Var(u32::MAX)} == {Expr::Var(u32::MAX)}),
-        rule!(errno(8) getppid() when @0 == @0 && {Expr::Var(6)} == {Expr::Var(6)}),
+        rule!(errno(8) getppid() if {Expr::Var(u32::MAX)} == {Expr::Var(u32::MAX)}),
+        rule!(errno(8) getppid() if @0 == @0 && {Expr::Var(6)} == {Expr::Var(6)}),
     ] {
         assert!(filter.add(rule).is_err());
     }
@@ -74,7 +74,7 @@ fn failed_bad_arch_keeps_action() {
 /// An argument test narrows a rule to the calls that pass it.
 #[test]
 fn arg_eq() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) when fd == 42u32));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if fd == 42u32));
     unsafe {
         filter.install_and_check(libc::SYS_lseek, [42, 0, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_lseek, [43, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -85,7 +85,7 @@ fn arg_eq() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn arg_high_word() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) when offset == 0x1_0000_0000isize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x1_0000_0000isize));
     unsafe {
         filter.install_and_check(libc::SYS_lseek, [43, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_lseek, [43, 1, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -95,7 +95,7 @@ fn arg_high_word() {
 /// A test on a 16-bit argument ignores the register bits above it.
 #[test]
 fn narrow_arg() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) when mode == 0o644u16));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode == 0o644u16));
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_fchmod, [fd, 0o644, 0, 0, 0, 0], Expect::Denied);
@@ -107,7 +107,7 @@ fn narrow_arg() {
 /// An ordering test on a signed argument compares it as signed.
 #[test]
 fn signed_arg() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} ftruncate(fd, length) when length < -1isize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} ftruncate(fd, length) if length < -1isize));
     let fd = libc::c_ulong::MAX;
     for (length, expect) in [
         (libc::c_long::MIN, Expect::Denied),
@@ -125,8 +125,7 @@ fn signed_arg() {
 fn six_conds() {
     let sig = Syscall::ProcessVmReadv.signature(Arch::native().unwrap());
     let &[t0, t1, t2, t3, t4, t5] = sig else { panic!("{sig:?}") };
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
-        when flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0));
     unsafe {
         filter.install_and_check(libc::SYS_process_vm_readv, [1, 2, 3, 4, 5, 6], Expect::Denied);
         filter.install_and_check(libc::SYS_process_vm_readv, [2, 2, 3, 4, 5, 6], Expect::Errno(libc::EINVAL));
@@ -142,7 +141,7 @@ fn six_conds() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn eq_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) when flags == 0x1_0000_0001usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 0x1_0000_0001usize));
     unsafe {
         filter.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 0x1_0000_0001], Expect::Denied);
         filter.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 1], Expect::Errno(libc::EINVAL));
@@ -155,7 +154,7 @@ fn eq_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ne_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} munmap(addr, len) when addr != 0x1_0000_0001usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} munmap(addr, len) if addr != 0x1_0000_0001usize));
     unsafe {
         filter.install_and_check(libc::SYS_munmap, [0x1_0000_0001, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
         filter.install_and_check(libc::SYS_munmap, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -168,8 +167,8 @@ fn ne_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn lt_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) when len < 0x1_0000_0001usize));
-    let never = Filter::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) when len < 0usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) if len < 0x1_0000_0001usize));
+    let never = Filter::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) if len < 0usize));
     unsafe {
         filter.install_and_check(libc::SYS_msync, [1, 0xffff_ffff, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_msync, [1, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
@@ -184,8 +183,8 @@ fn lt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn le_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) when count <= 0x1_0000_0000usize));
-    let always = Filter::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) when count <= 0xffff_ffff_ffff_ffffusize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) if count <= 0x1_0000_0000usize));
+    let always = Filter::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) if count <= 0xffff_ffff_ffff_ffffusize));
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_read, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Denied);
@@ -201,8 +200,8 @@ fn le_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn gt_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) when count > 0xffff_ffffusize));
-    let never = Filter::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) when count > 0xffff_ffff_ffff_ffffusize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffffusize));
+    let never = Filter::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffff_ffff_ffffusize));
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_sendfile, [fd, fd, 0, 0xffff_fffe, 0, 0], Expect::Errno(libc::EBADF));
@@ -218,8 +217,8 @@ fn gt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ge_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) when len >= 0x1_0000_0000usize));
-    let always = Filter::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) when len >= 0usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0x1_0000_0000usize));
+    let always = Filter::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0usize));
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_splice, [fd, 0, fd, 0, 0xffff_ffff, 0], Expect::Errno(libc::EBADF));
@@ -235,10 +234,8 @@ fn ge_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn masked_eq_64() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
-        when sigsetsize & 0xf0_0000_000fusize == 0xa0_0000_0005usize));
-    let high = Filter::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
-        when sigsetsize & 0xffff_ffff_0000_0000usize == 0x1_0000_0000usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) if sigsetsize & 0xf0_0000_000fusize == 0xa0_0000_0005usize));
+    let high = Filter::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) if sigsetsize & 0xffff_ffff_0000_0000usize == 0x1_0000_0000usize));
     unsafe {
         filter.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xa0_0000_0005], Expect::Denied);
         filter.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xaf_ffff_fff5], Expect::Denied);
@@ -253,7 +250,7 @@ fn masked_eq_64() {
 /// Masked equality with a zero mask matches every value.
 #[test]
 fn zero_mask() {
-    let filter = Filter::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) when addr & 0usize == 0usize));
+    let filter = Filter::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if addr & 0usize == 0usize));
     unsafe {
         filter.install_and_check(libc::SYS_mprotect, [0, 0, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_mprotect, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -267,8 +264,8 @@ fn zero_mask() {
 fn unsigned_arg() {
     let sign = (1 as libc::c_ulong) << (libc::c_ulong::BITS - 1);
     let policy_sign = 1u64 << (libc::c_ulong::BITS - 1);
-    let below = Filter::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) when count < {policy_sign as usize}));
-    let above = Filter::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) when count > {policy_sign as usize}));
+    let below = Filter::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) if count < {policy_sign as usize}));
+    let above = Filter::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) if count > {policy_sign as usize}));
     let fd = libc::c_ulong::MAX;
     unsafe {
         below.install_and_check(libc::SYS_write, [fd, 0, 0, 0, 0, 0], Expect::Denied);
@@ -337,7 +334,7 @@ fn x86_socketcall() {
 #[test]
 fn x86_socketcall_exact_conds() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
-    filter.add(rule!({Expect::DENY} exact socket(domain, ty, protocol) when domain == 1)).unwrap();
+    filter.add(rule!({Expect::DENY} exact socket(domain, ty, protocol) if domain == 1)).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     unsafe {
         filter.install_and_check(libc::SYS_socket, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -407,11 +404,11 @@ fn rule_on_archs() {
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     filter.add_arch(other).unwrap();
-    filter.add(rule!({Expect::DENY} getpid() on {other})).unwrap();
-    filter.add(rule!({Expect::DENY} getppid() on {other}, {native})).unwrap();
+    filter.add(rule!([{other}] {Expect::DENY} getpid())).unwrap();
+    filter.add(rule!([{other}, {native}] {Expect::DENY} getppid())).unwrap();
     filter.add(rule!({Expect::DENY} getuid())).unwrap();
-    filter.add(rule!({Expect::DENY} exact getgid() on {other})).unwrap();
-    filter.add(rule!({Expect::DENY} exact gettid() on {native})).unwrap();
+    filter.add(rule!([{other}] {Expect::DENY} exact getgid())).unwrap();
+    filter.add(rule!([{native}] {Expect::DENY} exact gettid())).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_getpid, [0; 6], Expect::Ok);
         filter.install_and_check(libc::SYS_getppid, [0; 6], Expect::Denied);
@@ -428,15 +425,15 @@ fn rule_on_archs_checks() {
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
     let mut filter = Filter::new_native_allow(rule!({Expect::DENY} getpid()));
     assert!(matches!(
-        filter.add(rule!({Expect::DENY} getppid() on {other})),
+        filter.add(rule!([{other}] {Expect::DENY} getppid())),
         Err(Error::Check(CheckError::RuleArchNotEnabled)),
     ));
     assert!(matches!(
-        filter.add(rule!({Expect::DENY} exact getppid() on {native}, {other})),
+        filter.add(rule!([{native}, {other}] {Expect::DENY} exact getppid())),
         Err(Error::Check(CheckError::RuleArchNotEnabled)),
     ));
     assert!(matches!(
-        filter.add(rule!({Expect::DENY} getppid() on {native}, {native})),
+        filter.add(rule!([{native}, {native}] {Expect::DENY} getppid())),
         Err(Error::Check(CheckError::DuplicateArch)),
     ));
     unsafe {
@@ -520,7 +517,7 @@ fn repeat_default() {
 #[test]
 fn arg_out_of_range() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) when {Expr::Var(6)} == {Expr::Var(6)})),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) if {Expr::Var(6)} == {Expr::Var(6)})),
         Err(Error::Check(CheckError::InvalidArg { given: 6, total: 3 })),
     ));
 }
@@ -530,7 +527,7 @@ fn arg_out_of_range() {
 fn skip_rule() {
     assert!(Filter::new_native_with_rule(Action::Allow, rule!(errno(1) skip())).is_ok());
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) skip() when @0 == @0)),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) skip() if @0 == @0)),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
@@ -539,7 +536,7 @@ fn skip_rule() {
 #[test]
 fn no_args() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) getpid() when @0 == @0)),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) getpid() if @0 == @0)),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
@@ -548,15 +545,15 @@ fn no_args() {
 #[test]
 fn arg_type_errors() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmodat(dirfd, pathname, mode) when pathname < 0 as ptr)),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmodat(dirfd, pathname, mode) if pathname < 0 as ptr)),
         Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Lt, lhs: Ptr, rhs: Ptr, .. })),
     ));
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) when mode == 1i16)),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) if mode == 1i16)),
         Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Eq, lhs: U(16), rhs: I(16) })),
     ));
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) when mode & 0x1_0000u32 == 0u16)),
+        Filter::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) if mode & 0x1_0000u32 == 0u16)),
         Err(Error::Check(CheckError::BinOpTypes { op: BinOp::And, lhs: U(16), rhs: U(32), .. })),
     ));
 }
@@ -564,7 +561,7 @@ fn arg_type_errors() {
 /// A `u32` constant fits an `off_t` argument only where the word is wider than 32 bits.
 #[test]
 fn word_literal() {
-    let result = Filter::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) when offset == 1u32));
+    let result = Filter::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) if offset == 1u32));
     if cfg!(target_pointer_width = "64") {
         assert!(result.is_ok());
     } else {
@@ -586,7 +583,7 @@ fn errno_edges() {
 fn long_chain() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     for i in 0..300 {
-        filter.add(rule!({Expect::DENY} read(fd, buf, count) when count == {i as usize})).unwrap();
+        filter.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
     }
     let fd = libc::c_ulong::MAX;
     unsafe {
@@ -603,7 +600,7 @@ fn long_chain() {
 fn too_large() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     for i in 0..4096 {
-        filter.add(rule!({Expect::DENY} read(fd, buf, count) when count == {i as usize})).unwrap();
+        filter.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
     }
     let before = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
     assert!(matches!(filter.install(), Err(Error::FilterTooLarge)));
