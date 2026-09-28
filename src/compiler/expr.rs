@@ -226,10 +226,8 @@ impl CmpOp {
     pub(super) open spec fn wide_holds(self, high: u32, low: u32, k_hi: u32, k_lo: u32) -> bool {
         if high == k_hi {
             self.holds(low as int, k_lo as int)
-        } else if high > k_hi && !(self is Eq) {
-            false
         } else {
-            !(self is Eq)
+            !(self is Eq) && high < k_hi
         }
     }
 
@@ -494,27 +492,24 @@ impl CmpOp {
         Ok(())
     }
 
-    /// Emits a test of the patterns in scratch pairs `ls` and `rs`, their high words
-    /// flipped by `bias`, that goes on to `pass` if it holds and to `fail` otherwise.
+    /// Emits a test of the patterns in scratch pairs 0 and 1, their high words flipped by
+    /// `bias`, that goes on to `pass` if it holds and to `fail` otherwise.
     ///
     /// ```text
-    ///     ld  M[rs.hi]
+    ///     ld  M[3]
     ///     xor #bias               ; bias != 0
     ///     tax
-    ///     ld  M[ls.hi]
+    ///     ld  M[1]
     ///     xor #bias               ; bias != 0
     ///     jgt x -> fail           ; ordering
     ///     jne x -> pass/fail      ; pass for ordering
-    ///     ldx M[rs.lo]
-    ///     ld  M[ls.lo]
+    ///     ldx M[2]
+    ///     ld  M[0]
     ///     j<op> x -> pass/fail
     /// ```
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn emit_pairs(self, b: &mut Builder, bias: u32, ls: u32, rs: u32, pass: Label, fail: Label)
+    pub(super) fn emit_pairs(self, b: &mut Builder, bias: u32, pass: Label, fail: Label)
         -> (res: Result<(), CompileError>)
         requires
-            ls < 8,
-            rs < 8,
             0 < pass <= old(b).rev@.len(),
             0 < fail <= old(b).rev@.len(),
             pass == old(b).rev@.len() || fail == old(b).rev@.len(),
@@ -523,21 +518,21 @@ impl CmpOp {
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
             res is Ok ==> forall |data: &[u8], t: Regs, pl: u64, pr: u64|
-                #![trigger t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+                #![trigger t.holds(0, pl), t.holds(1, pr),
                     Builder::lands(final(b).rev@, data, final(b).rev@.len(), t, pass as nat)]
-                t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr)
+                t.wf() && t.holds(0, pl) && t.holds(1, pr)
                 && self.wide_holds(((pl >> 32) as u32) ^ bias, pl as u32, ((pr >> 32) as u32) ^ bias, pr as u32) ==>
                 Builder::lands(final(b).rev@, data, final(b).rev@.len(), t, pass as nat),
             res is Ok ==> forall |data: &[u8], t: Regs, pl: u64, pr: u64|
-                #![trigger t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+                #![trigger t.holds(0, pl), t.holds(1, pr),
                     Builder::lands(final(b).rev@, data, final(b).rev@.len(), t, fail as nat)]
-                t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr)
+                t.wf() && t.holds(0, pl) && t.holds(1, pr)
                 && !self.wide_holds(((pl >> 32) as u32) ^ bias, pl as u32, ((pr >> 32) as u32) ^ bias, pr as u32) ==>
                 Builder::lands(final(b).rev@, data, final(b).rev@.len(), t, fail as nat),
     {
         self.emit_jump(b, Src::X, pass, fail)?;
         let ghost r_jmp = b.rev@;
-        let low = [Instr::LdxMem(2 * rs), Instr::LdMem(2 * ls)];
+        let low = [Instr::LdxMem(2), Instr::LdMem(0)];
         proof { reveal_with_fuel(Instr::fits_from, 3); }
         b.emit_block(&low);
         let ghost r_low = b.rev@;
@@ -545,41 +540,31 @@ impl CmpOp {
         let ghost r_gt = b.rev@;
         let ghost high = |t: Regs, pl: u64, pr: u64|
             Regs { a: ((pl >> 32) as u32) ^ bias, x: ((pr >> 32) as u32) ^ bias, mem: t.mem };
-        if bias != 0 {
-            let block = [Instr::LdMem(2 * rs + 1), Instr::Alu(AluOp::Xor, Src::K(bias)), Instr::Tax,
-                Instr::LdMem(2 * ls + 1), Instr::Alu(AluOp::Xor, Src::K(bias))];
-            proof { reveal_with_fuel(Instr::fits_from, 6); }
-            b.emit_block(&block);
-            proof {
-                assert forall |data: &[u8], t: Regs, pl: u64, pr: u64|
-                    t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr) implies
-                    #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), t, r_gt.len(), high(t, pl, pr)) by {
-                    reveal_with_fuel(Instr::exec_block, 6);
-                    assert(Instr::exec_block(block@, 0, data, t) == Some(high(t, pl, pr)));
-                }
-            }
+        let block: &[Instr] = if bias != 0 {
+            &[Instr::LdMem(3), Instr::Alu(AluOp::Xor, Src::K(bias)), Instr::Tax,
+                Instr::LdMem(1), Instr::Alu(AluOp::Xor, Src::K(bias))]
         } else {
-            let block = [Instr::LdMem(2 * rs + 1), Instr::Tax, Instr::LdMem(2 * ls + 1)];
-            proof { reveal_with_fuel(Instr::fits_from, 4); }
-            b.emit_block(&block);
-            proof {
-                assert forall |data: &[u8], t: Regs, pl: u64, pr: u64|
-                    t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr) implies
-                    #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), t, r_gt.len(), high(t, pl, pr)) by {
-                    let (hl, hr) = ((pl >> 32) as u32, (pr >> 32) as u32);
-                    assert(hl ^ 0u32 == hl && hr ^ 0u32 == hr) by (bit_vector);
-                    reveal_with_fuel(Instr::exec_block, 4);
-                    assert(Instr::exec_block(block@, 0, data, t) == Some(high(t, pl, pr)));
-                }
+            &[Instr::LdMem(3), Instr::Tax, Instr::LdMem(1)]
+        };
+        proof { reveal_with_fuel(Instr::fits_from, 6); }
+        b.emit_block(block);
+        proof {
+            assert forall |data: &[u8], t: Regs, pl: u64, pr: u64|
+                t.wf() && t.holds(0, pl) && t.holds(1, pr) implies
+                #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), t, r_gt.len(), high(t, pl, pr)) by {
+                let (hl, hr) = ((pl >> 32) as u32, (pr >> 32) as u32);
+                assert(hl ^ 0u32 == hl && hr ^ 0u32 == hr) by (bit_vector);
+                reveal_with_fuel(Instr::exec_block, 6);
+                assert(Instr::exec_block(block@, 0, data, t) == Some(high(t, pl, pr)));
             }
         }
         proof {
             assert forall |data: &[u8], t: Regs, pl: u64, pr: u64|
-                #![trigger t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+                #![trigger t.holds(0, pl), t.holds(1, pr),
                     Builder::lands(b.rev@, data, b.rev@.len(), t, pass as nat)]
-                #![trigger t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+                #![trigger t.holds(0, pl), t.holds(1, pr),
                     Builder::lands(b.rev@, data, b.rev@.len(), t, fail as nat)]
-                t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr) implies {
+                t.wf() && t.holds(0, pl) && t.holds(1, pr) implies {
                 let holds = self.wide_holds(((pl >> 32) as u32) ^ bias, pl as u32, ((pr >> 32) as u32) ^ bias, pr as u32);
                 &&& holds ==> Builder::lands(b.rev@, data, b.rev@.len(), t, pass as nat)
                 &&& !holds ==> Builder::lands(b.rev@, data, b.rev@.len(), t, fail as nat)
@@ -866,11 +851,9 @@ impl Cond {
                     let t2 = r.ty(arch, sig);
                     let signed = t1.exec_signed() || t2.exec_signed();
                     let bias: u32 = if signed && *op != CmpOp::Eq { 0x8000_0000 } else { 0 };
-                    // The operand that needs more scratch pairs goes first, into pair 0.
-                    let (ls, rs): (u32, u32) = if l.pairs() >= r.pairs() { (0, 1) } else { (1, 0) };
-                    op.emit_pairs(b, bias, ls, rs, pass_at, fail_at)?;
+                    op.emit_pairs(b, bias, pass_at, fail_at)?;
                     let ghost mid = b.rev@;
-                    l.emit_operands(r, b, arch, sig, 0, ls, rs)?;
+                    l.emit_operands(r, b, arch, sig, 0)?;
                     proof {
                         assert forall |data: &[u8], st: Regs|
                             #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, pass_at as nat)]
@@ -885,9 +868,8 @@ impl Cond {
                             let pr = r.pattern(arch, ctx, data);
                             self.lemma_pairs(arch, ctx, data, t1, t2);
                             let to = if self.holds(arch, ctx, data) { pass_at } else { fail_at };
-                            assert(Builder::stores2(b.rev@, data, b.rev@.len(), st, mid.len(), 0,
-                                ls as nat, pl, rs as nat, pr));
-                            let t = choose |t: Regs| t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr)
+                            assert(Builder::stores2(b.rev@, data, b.rev@.len(), st, mid.len(), 0, pl, pr));
+                            let t = choose |t: Regs| t.wf() && t.holds(0, pl) && t.holds(1, pr)
                                 && t.keeps(st, 0) && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), st, mid.len(), t);
                             assert(Builder::lands(mid, data, mid.len(), t, to as nat));
                             Builder::lemma_then(mid, b.rev@, data, b.rev@.len(), st, mid.len(), t, to as nat, 0);

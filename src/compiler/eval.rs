@@ -16,12 +16,11 @@ impl Arch {
 }
 
 impl Rule {
-    /// Whether the rule's body accepts `ev`: multiplexer selector `sel` if there is
-    /// one, and the rule's condition otherwise.
-    pub(super) open spec fn body_holds(self, arch: Arch, sel: Option<u32>, ev: Event) -> bool {
+    /// Whether the rule's body accepts `ev`: multiplexer selector and mask `sel` if there
+    /// are any, and the rule's condition otherwise.
+    pub(super) open spec fn body_holds(self, arch: Arch, sel: Option<(u32, u32)>, ev: Event) -> bool {
         match sel {
-            Some(arg) => arg == (ev.args[0]
-                & if self.syscall.to_ipc_arg() is Some { 0xFFFF } else { 0xFFFF_FFFF }) as u32,
+            Some((arg, mask)) => arg == (ev.args[0] & mask as u64) as u32,
             None => {
                 let sig = self.syscall.spec_signature(arch);
                 self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
@@ -30,8 +29,8 @@ impl Rule {
     }
 
     /// Whether the test for syscall number `nr` reaches this rule and its body, with
-    /// selector `sel`, accepts `ev`.
-    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, sel: Option<u32>, ev: Event) -> bool {
+    /// selector and mask `sel`, accepts `ev`.
+    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, sel: Option<(u32, u32)>, ev: Event) -> bool {
         ev.nr as u32 == nr && self.body_holds(arch, sel, ev)
     }
 
@@ -41,8 +40,8 @@ impl Rule {
                 Some(nr) => self.matches_at(arch, nr, None, ev),
                 None => false,
             }
-        ||| match self.spec_mux_nr(arch) {
-                Some(nr) => self.matches_at(arch, nr, self.spec_mux_arg(arch), ev),
+        ||| match self.spec_mux(arch) {
+                Some((nr, arg, mask)) => self.matches_at(arch, nr, Some((arg, mask)), ev),
                 None => false,
             }
     }

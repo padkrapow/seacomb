@@ -256,11 +256,9 @@ impl PrimType {
         let ghost base = b.rev@;
         let bits = self.exec_bits(arch);
         let signed = self.exec_signed();
-        let mask = self.exec_mask(arch);
         let lo = 2 * slot;
         let hi = 2 * slot + 1;
-        proof { self.lemma_mask(arch); }
-        if bits >= 64 {
+        if bits == 64 {
             proof {
                 assert forall |data: &[u8], r: Regs, q: u64| r.wf() && r.mem[2 * slot as int] == Some(q as u32)
                     && (self.bits(arch) > 32 ==> r.mem[2 * slot + 1] == Some((q >> 32) as u32))
@@ -273,35 +271,34 @@ impl PrimType {
             }
             return;
         }
-        if bits == 32 {
-            if signed {
-                let block = [Instr::LdMem(lo), Instr::Alu(AluOp::Rsh, Src::K(31)), Instr::Neg, Instr::St(hi)];
-                proof { reveal_with_fuel(Instr::fits_from, 5); }
-                b.emit_block(&block);
-                proof { self.lemma_norm_block(b.rev@, base, arch, slot); }
-            } else {
-                let block = [Instr::LdImm(0), Instr::St(hi)];
-                proof { reveal_with_fuel(Instr::fits_from, 3); }
-                b.emit_block(&block);
-                proof { self.lemma_norm_block(b.rev@, base, arch, slot); }
-            }
+        let mask = self.exec_mask(arch);
+        proof { assert(mask >> 1u64 < u64::MAX) by (bit_vector); }
+        let m0 = mask as u32;
+        let s0 = ((mask >> 1) + 1) as u32;
+        let block: &[Instr] = if bits == 32 && signed {
+            &[Instr::LdMem(lo), Instr::Alu(AluOp::Rsh, Src::K(31)), Instr::Neg, Instr::St(hi)]
+        } else if bits == 32 {
+            &[Instr::LdImm(0), Instr::St(hi)]
+        } else if signed {
+            &[Instr::LdMem(lo), Instr::Alu(AluOp::And, Src::K(m0)),
+                Instr::Alu(AluOp::Xor, Src::K(s0)), Instr::Alu(AluOp::Sub, Src::K(s0)), Instr::St(lo),
+                Instr::Alu(AluOp::Rsh, Src::K(31)), Instr::Neg, Instr::St(hi)]
         } else {
-            let m0 = mask as u32;
-            proof { assert(mask >> 1u64 < u64::MAX) by (bit_vector); }
-            let s0 = ((mask >> 1) + 1) as u32;
-            if signed {
-                let block = [Instr::LdMem(lo), Instr::Alu(AluOp::And, Src::K(m0)),
-                    Instr::Alu(AluOp::Xor, Src::K(s0)), Instr::Alu(AluOp::Sub, Src::K(s0)), Instr::St(lo),
-                    Instr::Alu(AluOp::Rsh, Src::K(31)), Instr::Neg, Instr::St(hi)];
-                proof { reveal_with_fuel(Instr::fits_from, 9); }
-                b.emit_block(&block);
-                proof { self.lemma_norm_block(b.rev@, base, arch, slot); }
-            } else {
-                let block = [Instr::LdMem(lo), Instr::Alu(AluOp::And, Src::K(m0)), Instr::St(lo),
-                    Instr::LdImm(0), Instr::St(hi)];
-                proof { reveal_with_fuel(Instr::fits_from, 6); }
-                b.emit_block(&block);
-                proof { self.lemma_norm_block(b.rev@, base, arch, slot); }
+            &[Instr::LdMem(lo), Instr::Alu(AluOp::And, Src::K(m0)), Instr::St(lo),
+                Instr::LdImm(0), Instr::St(hi)]
+        };
+        proof {
+            assert(block@ == self.norm_block(arch, slot));
+            reveal_with_fuel(Instr::fits_from, 9);
+        }
+        b.emit_block(block);
+        proof {
+            assert forall |data: &[u8], r: Regs, q: u64| r.wf() && r.mem[2 * slot as int] == Some(q as u32)
+                && (self.bits(arch) > 32 ==> r.mem[2 * slot + 1] == Some((q >> 32) as u32))
+                implies #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), r, base.len(), slot as nat,
+                    self.norm(arch, q)) by {
+                let t = self.lemma_norm_run(arch, slot, data, r, q);
+                assert(Builder::goes(b.rev@, data, b.rev@.len(), r, base.len(), t));
             }
         }
     }
@@ -331,70 +328,29 @@ impl PrimType {
         }
     }
 
-    /// The block [`PrimType::emit_norm`] emits for this type normalizes the pair it works on.
-    proof fn lemma_norm_block(self, rev: Seq<Instr>, base: Seq<Instr>, arch: Arch, slot: u32)
+    /// Running the block [`PrimType::emit_norm`] emits for a type narrower than 64 bits
+    /// normalizes the pair it works on.
+    proof fn lemma_norm_run(self, arch: Arch, slot: u32, data: &[u8], r: Regs, q: u64) -> (t: Regs)
         requires
             slot < 8,
             self.wf(),
             self.bits(arch) < 64,
-            forall |data: &[u8], r: Regs| #[trigger] Instr::exec_block(self.norm_block(arch, slot), 0, data, r)
-                matches Some(t) ==> Builder::goes(rev, data, rev.len(), r, base.len(), t),
+            r.wf(),
+            r.mem[2 * slot as int] == Some(q as u32),
         ensures
-            forall |data: &[u8], r: Regs, q: u64| r.wf() && r.mem[2 * slot as int] == Some(q as u32)
-                && (self.bits(arch) > 32 ==> r.mem[2 * slot + 1] == Some((q >> 32) as u32))
-                ==> #[trigger] Builder::stores(rev, data, rev.len(), r, base.len(), slot as nat, self.norm(arch, q)),
+            Instr::exec_block(self.norm_block(arch, slot), 0, data, r) == Some(t),
+            t.wf(),
+            t.holds(slot as nat, self.norm(arch, q)),
+            t.keeps(r, 2 * slot as nat),
     {
-        assert forall |data: &[u8], r: Regs, q: u64| r.wf() && r.mem[2 * slot as int] == Some(q as u32)
-            && (self.bits(arch) > 32 ==> r.mem[2 * slot + 1] == Some((q >> 32) as u32))
-            implies #[trigger] Builder::stores(rev, data, rev.len(), r, base.len(), slot as nat, self.norm(arch, q)) by {
-            let t = if self.bits(arch) == 32 {
-                self.lemma_norm_run_word(arch, slot, data, r, q)
-            } else {
-                self.lemma_norm_run_narrow(arch, slot, data, r, q)
-            };
-            assert(Builder::goes(rev, data, rev.len(), r, base.len(), t));
+        self.lemma_mask(arch);
+        self.lemma_norm(arch, q);
+        if self.bits(arch) == 32 {
+            assert(((1u64 << 32u64) - 1) as u64 == 0xFFFF_FFFFu64) by (bit_vector);
+            Self::lemma_norm_word(q, self.signed());
+        } else {
+            Self::lemma_norm_narrow(q, self.mask(arch), self.bits(arch), self.signed());
         }
-    }
-
-    /// Running the block [`PrimType::emit_norm`] emits for a type exactly 32 bits wide
-    /// normalizes the pair it works on.
-    proof fn lemma_norm_run_word(self, arch: Arch, slot: u32, data: &[u8], r: Regs, q: u64) -> (t: Regs)
-        requires
-            slot < 8,
-            self.bits(arch) == 32,
-            r.wf(),
-            r.mem[2 * slot as int] == Some(q as u32),
-        ensures
-            Instr::exec_block(self.norm_block(arch, slot), 0, data, r) == Some(t),
-            t.wf(),
-            t.holds(slot as nat, self.norm(arch, q)),
-            t.keeps(r, 2 * slot as nat),
-    {
-        self.lemma_mask(arch);
-        self.lemma_norm(arch, q);
-        assert(((1u64 << 32u64) - 1) as u64 == 0xFFFF_FFFFu64) by (bit_vector);
-        Self::lemma_norm_word(q, self.signed());
-        reveal_with_fuel(Instr::exec_block, 5);
-        Instr::exec_block(self.norm_block(arch, slot), 0, data, r)->Some_0
-    }
-
-    /// Running the block [`PrimType::emit_norm`] emits for a type narrower than 32 bits
-    /// normalizes the pair it works on.
-    proof fn lemma_norm_run_narrow(self, arch: Arch, slot: u32, data: &[u8], r: Regs, q: u64) -> (t: Regs)
-        requires
-            slot < 8,
-            0 < self.bits(arch) < 32,
-            r.wf(),
-            r.mem[2 * slot as int] == Some(q as u32),
-        ensures
-            Instr::exec_block(self.norm_block(arch, slot), 0, data, r) == Some(t),
-            t.wf(),
-            t.holds(slot as nat, self.norm(arch, q)),
-            t.keeps(r, 2 * slot as nat),
-    {
-        self.lemma_mask(arch);
-        self.lemma_norm(arch, q);
-        Self::lemma_norm_narrow(q, self.mask(arch), self.bits(arch), self.signed());
         reveal_with_fuel(Instr::exec_block, 9);
         Instr::exec_block(self.norm_block(arch, slot), 0, data, r)->Some_0
     }
@@ -569,41 +525,25 @@ impl Expr {
                 }
             }
         }
-        if ty.exec_bits(arch) > 32 {
-            let block = [Instr::LdAbs(lo), Instr::St(2 * slot), Instr::LdAbs(hi), Instr::St(2 * slot + 1)];
-            proof { reveal_with_fuel(Instr::fits_from, 5); }
-            b.emit_block(&block);
-            proof {
-                assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf() implies
-                    #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), r, base.len(), slot as nat,
-                        self.pattern(arch, sig@, data)) by {
-                    assert(facts(data));
-                    let raw = arch.raw(Event::of(data).args, ty, at as nat);
-                    reveal_with_fuel(Instr::exec_block, 5);
-                    let t = Instr::exec_block(block@, 0, data, r)->Some_0;
-                    assert(t.keeps(r, 2 * slot as nat));
-                    assert(Builder::stores(r_norm, data, r_norm.len(), t, base.len(), slot as nat, ty.norm(arch, raw)));
-                    Builder::lemma_stores_then(r_norm, b.rev@, data, b.rev@.len(), r, r_norm.len(), t,
-                        2 * slot as nat, base.len(), slot as nat, ty.norm(arch, raw));
-                }
-            }
+        let block: &[Instr] = if ty.exec_bits(arch) > 32 {
+            &[Instr::LdAbs(lo), Instr::St(2 * slot), Instr::LdAbs(hi), Instr::St(2 * slot + 1)]
         } else {
-            let block = [Instr::LdAbs(lo), Instr::St(2 * slot)];
-            proof { reveal_with_fuel(Instr::fits_from, 3); }
-            b.emit_block(&block);
-            proof {
-                assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf() implies
-                    #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), r, base.len(), slot as nat,
-                        self.pattern(arch, sig@, data)) by {
-                    assert(facts(data));
-                    let raw = arch.raw(Event::of(data).args, ty, at as nat);
-                    reveal_with_fuel(Instr::exec_block, 3);
-                    let t = Instr::exec_block(block@, 0, data, r)->Some_0;
-                    assert(t.keeps(r, 2 * slot as nat));
-                    assert(Builder::stores(r_norm, data, r_norm.len(), t, base.len(), slot as nat, ty.norm(arch, raw)));
-                    Builder::lemma_stores_then(r_norm, b.rev@, data, b.rev@.len(), r, r_norm.len(), t,
-                        2 * slot as nat, base.len(), slot as nat, ty.norm(arch, raw));
-                }
+            &[Instr::LdAbs(lo), Instr::St(2 * slot)]
+        };
+        proof { reveal_with_fuel(Instr::fits_from, 5); }
+        b.emit_block(block);
+        proof {
+            assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf() implies
+                #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), r, base.len(), slot as nat,
+                    self.pattern(arch, sig@, data)) by {
+                assert(facts(data));
+                let raw = arch.raw(Event::of(data).args, ty, at as nat);
+                reveal_with_fuel(Instr::exec_block, 5);
+                let t = Instr::exec_block(block@, 0, data, r)->Some_0;
+                assert(t.keeps(r, 2 * slot as nat));
+                assert(Builder::stores(r_norm, data, r_norm.len(), t, base.len(), slot as nat, ty.norm(arch, raw)));
+                Builder::lemma_stores_then(r_norm, b.rev@, data, b.rev@.len(), r, r_norm.len(), t,
+                    2 * slot as nat, base.len(), slot as nat, ty.norm(arch, raw));
             }
         }
         Ok(())
@@ -729,12 +669,10 @@ impl Expr {
         };
         let ty = self.ty(arch, sig);
         proof { self.lemma_operands_typed(arch, sig@); }
-        // The operand that needs more scratch pairs goes first, into `slot`.
-        let (ls, rs) = if l.pairs() >= r.pairs() { (slot, slot + 1) } else { (slot + 1, slot) };
         let ghost base = b.rev@;
-        op.emit_pairs(b, arch, ty, ls, rs, slot);
+        op.emit_pairs(b, arch, ty, slot);
         let ghost mid = b.rev@;
-        l.emit_operands(r, b, arch, sig, slot, ls, rs)?;
+        l.emit_operands(r, b, arch, sig, slot)?;
         proof {
             assert forall |data: &[u8], r0: Regs| Event::parse(data) is Some && r0.wf() implies
                 #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), r0, base.len(), slot as nat,
@@ -742,78 +680,52 @@ impl Expr {
                 let pl = l.pattern(arch, sig@, data);
                 let pr = r.pattern(arch, sig@, data);
                 self.lemma_binary_pattern(arch, sig@, data, ty);
-                assert(Builder::stores2(b.rev@, data, b.rev@.len(), r0, mid.len(), slot as nat, ls as nat, pl, rs as nat, pr));
-                assert forall |t: Regs| t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr) implies
+                assert(Builder::stores2(b.rev@, data, b.rev@.len(), r0, mid.len(), slot as nat, pl, pr));
+                assert forall |t: Regs| t.wf() && t.holds(slot as nat, pl) && t.holds((slot + 1) as nat, pr) implies
                     #[trigger] Builder::stores(mid, data, mid.len(), t, base.len(), slot as nat,
                         self.pattern(arch, sig@, data)) by {
                     assert(Builder::stores(mid, data, mid.len(), t, base.len(), slot as nat, ty.norm(arch, op.apply(pl, pr))));
                 }
                 Builder::lemma_combine(mid, b.rev@, data, b.rev@.len(), r0, mid.len(), slot as nat,
-                    ls as nat, pl, rs as nat, pr, base.len(), self.pattern(arch, sig@, data));
+                    pl, pr, base.len(), self.pattern(arch, sig@, data));
             }
         }
         Ok(())
     }
 
-    /// Returns how many scratch pairs computing this expression takes, given that the
-    /// operand needing more of them goes first.
-    pub(super) fn pairs(&self) -> u32
-        decreases self
-    {
-        match self {
-            Expr::Var(_) | Expr::Lit(..) => 1,
-            Expr::Cast(e, _) => e.pairs(),
-            Expr::BinOp(_, l, r) => {
-                let p = l.pairs();
-                let q = r.pairs();
-                if p == q {
-                    if p < u32::MAX { p + 1 } else { p }
-                } else if p > q {
-                    p
-                } else {
-                    q
-                }
-            }
-        }
-    }
-
-    /// Emits code that computes this expression and `other` into scratch pairs `ls` and
-    /// `rs`, which are `slot` and `slot + 1` in some order, and leaves the pairs below
-    /// `slot` alone.
-    #[allow(unused_variables, clippy::too_many_arguments)]
-    pub(super) fn emit_operands(&self, other: &Expr, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32,
-        ls: u32, rs: u32) -> (res: Result<(), CompileError>)
+    /// Emits code that computes this expression and `other` into scratch pairs `slot` and
+    /// `slot + 1`, and leaves the pairs below `slot` alone.
+    pub(super) fn emit_operands(&self, other: &Expr, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32)
+        -> (res: Result<(), CompileError>)
         requires
             old(b).wf(), 0 < old(b).rev@.len(), slot + 1 < 8,
             self.typed(arch, sig@), other.typed(arch, sig@),
-            ls == slot && rs == slot + 1 || ls == slot + 1 && rs == slot,
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
             res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf() ==>
                 #[trigger] Builder::stores2(final(b).rev@, data, final(b).rev@.len(), r, old(b).rev@.len(),
-                    slot as nat, ls as nat, self.pattern(arch, sig@, data), rs as nat, other.pattern(arch, sig@, data)),
+                    slot as nat, self.pattern(arch, sig@, data), other.pattern(arch, sig@, data)),
         decreases self.size() + other.size(), 0nat
     {
-        let (first, second) = if ls == slot { (self, other) } else { (other, self) };
         let ghost base = b.rev@;
-        second.emit_value(b, arch, sig, slot + 1)?;
+        other.emit_value(b, arch, sig, slot + 1)?;
         let ghost mid = b.rev@;
-        first.emit_value(b, arch, sig, slot)?;
+        self.emit_value(b, arch, sig, slot)?;
         proof {
             assert forall |data: &[u8], r0: Regs| Event::parse(data) is Some && r0.wf() implies
                 #[trigger] Builder::stores2(b.rev@, data, b.rev@.len(), r0, base.len(), slot as nat,
-                    ls as nat, self.pattern(arch, sig@, data), rs as nat, other.pattern(arch, sig@, data)) by {
-                let pf = first.pattern(arch, sig@, data);
-                let ps = second.pattern(arch, sig@, data);
-                assert(Builder::stores(b.rev@, data, b.rev@.len(), r0, mid.len(), slot as nat, pf));
-                let t1 = choose |t: Regs| t.wf() && t.holds(slot as nat, pf) && t.keeps(r0, 2 * slot as nat)
+                    self.pattern(arch, sig@, data), other.pattern(arch, sig@, data)) by {
+                let pl = self.pattern(arch, sig@, data);
+                let pr = other.pattern(arch, sig@, data);
+                assert(Builder::stores(b.rev@, data, b.rev@.len(), r0, mid.len(), slot as nat, pl));
+                let t1 = choose |t: Regs| t.wf() && t.holds(slot as nat, pl) && t.keeps(r0, 2 * slot as nat)
                     && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r0, mid.len(), t);
-                assert(Builder::stores(mid, data, mid.len(), t1, base.len(), (slot + 1) as nat, ps));
-                let t2 = choose |t: Regs| t.wf() && t.holds((slot + 1) as nat, ps) && t.keeps(t1, 2 * (slot + 1) as nat)
+                assert(Builder::stores(mid, data, mid.len(), t1, base.len(), (slot + 1) as nat, pr));
+                let t2 = choose |t: Regs| t.wf() && t.holds((slot + 1) as nat, pr) && t.keeps(t1, 2 * (slot + 1) as nat)
                     && #[trigger] Builder::goes(mid, data, mid.len(), t1, base.len(), t);
                 Builder::lemma_goes_trans(mid, b.rev@, data, b.rev@.len(), r0, mid.len(), t1, base.len(), t2);
-                assert(t2.holds(slot as nat, pf));
+                assert(t2.holds(slot as nat, pl));
                 assert(t2.keeps(r0, 2 * slot as nat));
             }
         }
@@ -823,26 +735,26 @@ impl Expr {
 
 impl Builder {
     /// Whether every extension of `rev`, entered at `from` with registers `r`, carries on
-    /// at `to` with scratch pairs `ls` and `rs` holding `pl` and `pr`, and the words below
-    /// pair `below` as `r` has them.
-    pub(super) open spec fn stores2(rev: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat, below: nat, ls: nat, pl: u64, rs: nat, pr: u64) -> bool {
-        exists |t: Regs| t.wf() && t.holds(ls, pl) && t.holds(rs, pr) && t.keeps(r, 2 * below)
+    /// at `to` with scratch pairs `slot` and `slot + 1` holding `pl` and `pr`, and the words
+    /// below pair `slot` as `r` has them.
+    pub(super) open spec fn stores2(rev: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat, slot: nat, pl: u64, pr: u64) -> bool {
+        exists |t: Regs| t.wf() && t.holds(slot, pl) && t.holds(slot + 1, pr) && t.keeps(r, 2 * slot)
             && #[trigger] Self::goes(rev, data, from, r, to, t)
     }
 
     /// Code that stores two operands followed by code that combines them stores the combination.
-    pub(super) proof fn lemma_combine(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, mid: nat, below: nat, ls: nat, pl: u64, rs: nat, pr: u64, to: nat, p: u64)
+    pub(super) proof fn lemma_combine(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, mid: nat, slot: nat, pl: u64, pr: u64, to: nat, p: u64)
         requires
             Self::extends(rev, ext),
-            Self::stores2(ext, data, from, r, mid, below, ls, pl, rs, pr),
-            forall |t: Regs| t.wf() && t.holds(ls, pl) && t.holds(rs, pr)
-                ==> #[trigger] Self::stores(rev, data, mid, t, to, below, p),
-        ensures Self::stores(ext, data, from, r, to, below, p)
+            Self::stores2(ext, data, from, r, mid, slot, pl, pr),
+            forall |t: Regs| t.wf() && t.holds(slot, pl) && t.holds(slot + 1, pr)
+                ==> #[trigger] Self::stores(rev, data, mid, t, to, slot, p),
+        ensures Self::stores(ext, data, from, r, to, slot, p)
     {
-        let t = choose |t: Regs| t.wf() && t.holds(ls, pl) && t.holds(rs, pr) && t.keeps(r, 2 * below)
+        let t = choose |t: Regs| t.wf() && t.holds(slot, pl) && t.holds(slot + 1, pr) && t.keeps(r, 2 * slot)
             && #[trigger] Self::goes(ext, data, from, r, mid, t);
-        assert(Self::stores(rev, data, mid, t, to, below, p));
-        Self::lemma_stores_then(rev, ext, data, from, r, mid, t, 2 * below, to, below, p);
+        assert(Self::stores(rev, data, mid, t, to, slot, p));
+        Self::lemma_stores_then(rev, ext, data, from, r, mid, t, 2 * slot, to, slot, p);
     }
 }
 
@@ -1065,52 +977,52 @@ impl BinOp {
 
     /// The instructions [`BinOp::emit_pairs`] emits before normalizing, for a result more
     /// than 32 bits wide if `wide`.
-    pub(super) open spec fn block(self, wide: bool, ls: u32, rs: u32, slot: u32) -> Seq<Instr> {
+    pub(super) open spec fn block(self, wide: bool, slot: u32) -> Seq<Instr> {
         if !wide {
-            self.narrow_block(ls, rs, slot)
+            self.narrow_block(slot)
         } else {
             match self {
-                BinOp::Add => Self::add_block(ls, rs, slot),
-                BinOp::Sub => Self::sub_block(ls, rs, slot),
-                _ => self.bitwise_block(ls, rs, slot),
+                BinOp::Add => Self::add_block(slot),
+                BinOp::Sub => Self::sub_block(slot),
+                _ => self.bitwise_block(slot),
             }
         }
     }
 
     /// The instructions [`BinOp::emit_pairs`] emits before normalizing a result at most
     /// 32 bits wide.
-    pub(super) open spec fn narrow_block(self, ls: u32, rs: u32, slot: u32) -> Seq<Instr> {
-        seq![Instr::LdxMem((2 * rs) as u32), Instr::LdMem((2 * ls) as u32), Instr::Alu(self.spec_alu(), Src::X),
-            Instr::St((2 * slot) as u32)]
+    pub(super) open spec fn narrow_block(self, slot: u32) -> Seq<Instr> {
+        let (l0, r0) = ((2 * slot) as u32, (2 * slot + 2) as u32);
+        seq![Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(self.spec_alu(), Src::X), Instr::St(l0)]
     }
 
     /// The instructions [`BinOp::emit_pairs`] emits before normalizing a wider bitwise result.
-    pub(super) open spec fn bitwise_block(self, ls: u32, rs: u32, slot: u32) -> Seq<Instr> {
-        seq![Instr::LdxMem((2 * rs) as u32), Instr::LdMem((2 * ls) as u32), Instr::Alu(self.spec_alu(), Src::X),
-            Instr::St((2 * slot) as u32), Instr::LdxMem((2 * rs + 1) as u32), Instr::LdMem((2 * ls + 1) as u32),
-            Instr::Alu(self.spec_alu(), Src::X), Instr::St((2 * slot + 1) as u32)]
+    pub(super) open spec fn bitwise_block(self, slot: u32) -> Seq<Instr> {
+        let (l0, l1, r0, r1) = ((2 * slot) as u32, (2 * slot + 1) as u32, (2 * slot + 2) as u32, (2 * slot + 3) as u32);
+        seq![Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(self.spec_alu(), Src::X), Instr::St(l0),
+            Instr::LdxMem(r1), Instr::LdMem(l1), Instr::Alu(self.spec_alu(), Src::X), Instr::St(l1)]
     }
 
     /// The instructions [`BinOp::emit_pairs`] emits before normalizing a wider sum.
-    pub(super) open spec fn add_block(ls: u32, rs: u32, slot: u32) -> Seq<Instr> {
-        let (l0, l1, r0, r1) = ((2 * ls) as u32, (2 * ls + 1) as u32, (2 * rs) as u32, (2 * rs + 1) as u32);
+    pub(super) open spec fn add_block(slot: u32) -> Seq<Instr> {
+        let (l0, l1, r0, r1) = ((2 * slot) as u32, (2 * slot + 1) as u32, (2 * slot + 2) as u32, (2 * slot + 3) as u32);
         seq![Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X),
             Instr::Jmp { op: JmpOp::Ge, src: Src::X, jt: 2, jf: 0 },
             Instr::LdImm(1), Instr::Ja(1), Instr::LdImm(0),
             Instr::Tax, Instr::LdMem(l1), Instr::Alu(AluOp::Add, Src::X),
-            Instr::LdxMem(r1), Instr::Alu(AluOp::Add, Src::X), Instr::St((2 * slot + 1) as u32),
-            Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X), Instr::St((2 * slot) as u32)]
+            Instr::LdxMem(r1), Instr::Alu(AluOp::Add, Src::X), Instr::St(l1),
+            Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X), Instr::St(l0)]
     }
 
     /// The instructions [`BinOp::emit_pairs`] emits before normalizing a wider difference.
-    pub(super) open spec fn sub_block(ls: u32, rs: u32, slot: u32) -> Seq<Instr> {
-        let (l0, l1, r0, r1) = ((2 * ls) as u32, (2 * ls + 1) as u32, (2 * rs) as u32, (2 * rs + 1) as u32);
+    pub(super) open spec fn sub_block(slot: u32) -> Seq<Instr> {
+        let (l0, l1, r0, r1) = ((2 * slot) as u32, (2 * slot + 1) as u32, (2 * slot + 2) as u32, (2 * slot + 3) as u32);
         seq![Instr::LdxMem(r0), Instr::LdMem(l0),
             Instr::Jmp { op: JmpOp::Ge, src: Src::X, jt: 2, jf: 0 },
             Instr::LdImm(1), Instr::Ja(1), Instr::LdImm(0),
             Instr::Tax, Instr::LdMem(l1), Instr::Alu(AluOp::Sub, Src::X),
-            Instr::LdxMem(r1), Instr::Alu(AluOp::Sub, Src::X), Instr::St((2 * slot + 1) as u32),
-            Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(AluOp::Sub, Src::X), Instr::St((2 * slot) as u32)]
+            Instr::LdxMem(r1), Instr::Alu(AluOp::Sub, Src::X), Instr::St(l1),
+            Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(AluOp::Sub, Src::X), Instr::St(l0)]
     }
 
     /// The low word of this operation's pattern is the ALU's result on the low words.
@@ -1208,51 +1120,51 @@ impl BinOp {
     }
 
     /// Running [`BinOp::block`] computes the words of the pattern the result reads.
-    proof fn lemma_run(self, wide: bool, ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
+    proof fn lemma_run(self, wide: bool, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
-            t.wf(), t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+            slot + 1 < 8,
+            t.wf(), t.holds(slot as nat, pl), t.holds((slot + 1) as nat, pr),
         ensures
-            Instr::exec_block(self.block(wide, ls, rs, slot), 0, data, t) == Some(u),
+            Instr::exec_block(self.block(wide, slot), 0, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(self.apply(pl, pr) as u32),
             wide ==> u.mem[2 * slot + 1] == Some((self.apply(pl, pr) >> 32u64) as u32),
     {
         if !wide {
-            self.lemma_run_narrow(ls, rs, slot, data, t, pl, pr)
+            self.lemma_run_narrow(slot, data, t, pl, pr)
         } else {
             match self {
-                BinOp::Add => Self::lemma_run_add(ls, rs, slot, data, t, pl, pr),
-                BinOp::Sub => Self::lemma_run_sub(ls, rs, slot, data, t, pl, pr),
-                _ => self.lemma_run_bitwise(ls, rs, slot, data, t, pl, pr),
+                BinOp::Add => Self::lemma_run_add(slot, data, t, pl, pr),
+                BinOp::Sub => Self::lemma_run_sub(slot, data, t, pl, pr),
+                _ => self.lemma_run_bitwise(slot, data, t, pl, pr),
             }
         }
     }
 
     /// Running [`BinOp::narrow_block`] computes the low word of the pattern.
-    proof fn lemma_run_narrow(self, ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
+    proof fn lemma_run_narrow(self, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
-            t.wf(), t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+            slot + 1 < 8,
+            t.wf(), t.holds(slot as nat, pl), t.holds((slot + 1) as nat, pr),
         ensures
-            Instr::exec_block(self.narrow_block(ls, rs, slot), 0, data, t) == Some(u),
+            Instr::exec_block(self.narrow_block(slot), 0, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(self.apply(pl, pr) as u32),
     {
         self.lemma_low(pl, pr);
         reveal_with_fuel(Instr::exec_block, 5);
-        Instr::exec_block(self.narrow_block(ls, rs, slot), 0, data, t)->Some_0
+        Instr::exec_block(self.narrow_block(slot), 0, data, t)->Some_0
     }
 
     /// Running [`BinOp::add_block`] computes both words of the pattern of a sum.
-    proof fn lemma_run_add(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
+    proof fn lemma_run_add(slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
-            t.wf(), t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+            slot + 1 < 8,
+            t.wf(), t.holds(slot as nat, pl), t.holds((slot + 1) as nat, pr),
         ensures
-            Instr::exec_block(Self::add_block(ls, rs, slot), 0, data, t) == Some(u),
+            Instr::exec_block(Self::add_block(slot), 0, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(BinOp::Add.apply(pl, pr) as u32),
@@ -1261,20 +1173,20 @@ impl BinOp {
         let (l0, l1, r0, r1) = (pl as u32, (pl >> 32u64) as u32, pr as u32, (pr >> 32u64) as u32);
         let lo = AluOp::Add.eval(r0, l0);
         let c: u32 = if lo >= l0 { 0 } else { 1 };
-        Self::lemma_add_low(ls, rs, slot, data, t, l0, r0);
-        let u = Self::lemma_add_high(ls, rs, slot, data, Regs { a: c, x: l0, mem: t.mem }, l0, l1, r0, r1);
+        Self::lemma_add_low(slot, data, t, l0, r0);
+        let u = Self::lemma_add_high(slot, data, Regs { a: c, x: l0, mem: t.mem }, l0, l1, r0, r1);
         Self::lemma_add(pl, pr);
         u
     }
 
     /// The low words of [`BinOp::add_block`] leave the carry out of them in `A`.
-    proof fn lemma_add_low(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, l0: u32, r0: u32)
-        requires ls < 8, rs < 8, t.wf(), t.mem[2 * ls as int] == Some(l0), t.mem[2 * rs as int] == Some(r0)
+    proof fn lemma_add_low(slot: u32, data: &[u8], t: Regs, l0: u32, r0: u32)
+        requires slot + 1 < 8, t.wf(), t.mem[2 * slot as int] == Some(l0), t.mem[2 * slot + 2] == Some(r0)
         ensures ({
             let lo = AluOp::Add.eval(r0, l0);
             let c: u32 = if lo >= l0 { 0 } else { 1 };
-            Instr::exec_block(Self::add_block(ls, rs, slot), 0, data, t)
-                == Instr::exec_block(Self::add_block(ls, rs, slot), 7, data, Regs { a: c, x: l0, mem: t.mem })
+            Instr::exec_block(Self::add_block(slot), 0, data, t)
+                == Instr::exec_block(Self::add_block(slot), 7, data, Regs { a: c, x: l0, mem: t.mem })
         })
     {
         reveal_with_fuel(Instr::exec_block, 8);
@@ -1282,29 +1194,29 @@ impl BinOp {
 
     /// The high words of [`BinOp::add_block`] take in the carry, then the low words are
     /// summed again.
-    proof fn lemma_add_high(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, l0: u32, l1: u32, r0: u32, r1: u32) -> (u: Regs)
+    proof fn lemma_add_high(slot: u32, data: &[u8], t: Regs, l0: u32, l1: u32, r0: u32, r1: u32) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs, t.wf(),
-            t.mem[2 * ls as int] == Some(l0), t.mem[2 * ls + 1] == Some(l1),
-            t.mem[2 * rs as int] == Some(r0), t.mem[2 * rs + 1] == Some(r1),
+            slot + 1 < 8, t.wf(),
+            t.mem[2 * slot as int] == Some(l0), t.mem[2 * slot + 1] == Some(l1),
+            t.mem[2 * slot + 2] == Some(r0), t.mem[2 * slot + 3] == Some(r1),
         ensures
-            Instr::exec_block(Self::add_block(ls, rs, slot), 7, data, t) == Some(u),
+            Instr::exec_block(Self::add_block(slot), 7, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(AluOp::Add.eval(r0, l0)),
             u.mem[2 * slot + 1] == Some(AluOp::Add.eval(AluOp::Add.eval(l1, t.a), r1)),
     {
         reveal_with_fuel(Instr::exec_block, 11);
-        Instr::exec_block(Self::add_block(ls, rs, slot), 7, data, t)->Some_0
+        Instr::exec_block(Self::add_block(slot), 7, data, t)->Some_0
     }
 
     /// Running [`BinOp::sub_block`] computes both words of the pattern of a difference.
-    proof fn lemma_run_sub(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
+    proof fn lemma_run_sub(slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
-            t.wf(), t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+            slot + 1 < 8,
+            t.wf(), t.holds(slot as nat, pl), t.holds((slot + 1) as nat, pr),
         ensures
-            Instr::exec_block(Self::sub_block(ls, rs, slot), 0, data, t) == Some(u),
+            Instr::exec_block(Self::sub_block(slot), 0, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(BinOp::Sub.apply(pl, pr) as u32),
@@ -1312,19 +1224,19 @@ impl BinOp {
     {
         let (l0, l1, r0, r1) = (pl as u32, (pl >> 32u64) as u32, pr as u32, (pr >> 32u64) as u32);
         let bw: u32 = if l0 >= r0 { 0 } else { 1 };
-        Self::lemma_sub_low(ls, rs, slot, data, t, l0, r0);
-        let u = Self::lemma_sub_high(ls, rs, slot, data, Regs { a: bw, x: r0, mem: t.mem }, l0, l1, r0, r1);
+        Self::lemma_sub_low(slot, data, t, l0, r0);
+        let u = Self::lemma_sub_high(slot, data, Regs { a: bw, x: r0, mem: t.mem }, l0, l1, r0, r1);
         Self::lemma_sub(pl, pr);
         u
     }
 
     /// The low words of [`BinOp::sub_block`] leave the borrow out of them in `A`.
-    proof fn lemma_sub_low(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, l0: u32, r0: u32)
-        requires ls < 8, rs < 8, t.wf(), t.mem[2 * ls as int] == Some(l0), t.mem[2 * rs as int] == Some(r0)
+    proof fn lemma_sub_low(slot: u32, data: &[u8], t: Regs, l0: u32, r0: u32)
+        requires slot + 1 < 8, t.wf(), t.mem[2 * slot as int] == Some(l0), t.mem[2 * slot + 2] == Some(r0)
         ensures ({
             let bw: u32 = if l0 >= r0 { 0 } else { 1 };
-            Instr::exec_block(Self::sub_block(ls, rs, slot), 0, data, t)
-                == Instr::exec_block(Self::sub_block(ls, rs, slot), 6, data, Regs { a: bw, x: r0, mem: t.mem })
+            Instr::exec_block(Self::sub_block(slot), 0, data, t)
+                == Instr::exec_block(Self::sub_block(slot), 6, data, Regs { a: bw, x: r0, mem: t.mem })
         })
     {
         reveal_with_fuel(Instr::exec_block, 7);
@@ -1332,30 +1244,30 @@ impl BinOp {
 
     /// The high words of [`BinOp::sub_block`] take in the borrow, then the low words are
     /// subtracted again.
-    proof fn lemma_sub_high(ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, l0: u32, l1: u32, r0: u32, r1: u32) -> (u: Regs)
+    proof fn lemma_sub_high(slot: u32, data: &[u8], t: Regs, l0: u32, l1: u32, r0: u32, r1: u32) -> (u: Regs)
         requires
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs, t.wf(),
-            t.mem[2 * ls as int] == Some(l0), t.mem[2 * ls + 1] == Some(l1),
-            t.mem[2 * rs as int] == Some(r0), t.mem[2 * rs + 1] == Some(r1),
+            slot + 1 < 8, t.wf(),
+            t.mem[2 * slot as int] == Some(l0), t.mem[2 * slot + 1] == Some(l1),
+            t.mem[2 * slot + 2] == Some(r0), t.mem[2 * slot + 3] == Some(r1),
         ensures
-            Instr::exec_block(Self::sub_block(ls, rs, slot), 6, data, t) == Some(u),
+            Instr::exec_block(Self::sub_block(slot), 6, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(AluOp::Sub.eval(l0, r0)),
             u.mem[2 * slot + 1] == Some(AluOp::Sub.eval(AluOp::Sub.eval(l1, t.a), r1)),
     {
         reveal_with_fuel(Instr::exec_block, 11);
-        Instr::exec_block(Self::sub_block(ls, rs, slot), 6, data, t)->Some_0
+        Instr::exec_block(Self::sub_block(slot), 6, data, t)->Some_0
     }
 
     /// Running [`BinOp::bitwise_block`] combines the two pairs word by word.
-    proof fn lemma_run_bitwise(self, ls: u32, rs: u32, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
+    proof fn lemma_run_bitwise(self, slot: u32, data: &[u8], t: Regs, pl: u64, pr: u64) -> (u: Regs)
         requires
             !(self is Add), !(self is Sub),
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
-            t.wf(), t.holds(ls as nat, pl), t.holds(rs as nat, pr),
+            slot + 1 < 8,
+            t.wf(), t.holds(slot as nat, pl), t.holds((slot + 1) as nat, pr),
         ensures
-            Instr::exec_block(self.bitwise_block(ls, rs, slot), 0, data, t) == Some(u),
+            Instr::exec_block(self.bitwise_block(slot), 0, data, t) == Some(u),
             u.wf(),
             u.keeps(t, 2 * slot as nat),
             u.mem[2 * slot as int] == Some(self.apply(pl, pr) as u32),
@@ -1368,20 +1280,20 @@ impl BinOp {
             && ((pl ^ pr) as u32 == l0 ^ r0 && ((pl ^ pr) >> 32u64) as u32 == l1 ^ r1)) by (bit_vector)
             requires l0 == pl as u32, l1 == (pl >> 32u64) as u32, r0 == pr as u32, r1 == (pr >> 32u64) as u32;
         reveal_with_fuel(Instr::exec_block, 9);
-        Instr::exec_block(self.bitwise_block(ls, rs, slot), 0, data, t)->Some_0
+        Instr::exec_block(self.bitwise_block(slot), 0, data, t)->Some_0
     }
 
-    /// Emits code that combines the patterns in scratch pairs `ls` and `rs` into pair
-    /// `slot`, as a value of type `ty`.
+    /// Emits code that combines the patterns in scratch pairs `slot` and `slot + 1`, `l`
+    /// and `r` below, into pair `slot`, as a value of type `ty`.
     ///
     /// ```text
-    ///     ldx M[rs.lo]            ; result at most 32 bits wide
-    ///     ld  M[ls.lo]
+    ///     ldx M[r.lo]             ; result at most 32 bits wide
+    ///     ld  M[l.lo]
     ///     <op> x
-    ///     st  M[slot.lo]
+    ///     st  M[l.lo]
     ///
-    ///     ldx M[ls.lo]            ; wider sum
-    ///     ld  M[rs.lo]
+    ///     ldx M[l.lo]             ; wider sum
+    ///     ld  M[r.lo]
     ///     add x
     ///     jge x -> nc
     ///     ld  #1
@@ -1389,53 +1301,51 @@ impl BinOp {
     /// nc: ld  #0
     /// carry:
     ///     tax
-    ///     ld  M[ls.hi]
+    ///     ld  M[l.hi]
     ///     add x
-    ///     ldx M[rs.hi]
+    ///     ldx M[r.hi]
     ///     add x
-    ///     st  M[slot.hi]
-    ///     ldx M[ls.lo]
-    ///     ld  M[rs.lo]
+    ///     st  M[l.hi]
+    ///     ldx M[l.lo]
+    ///     ld  M[r.lo]
     ///     add x
-    ///     st  M[slot.lo]
+    ///     st  M[l.lo]
     ///
-    ///     ldx M[rs.lo]            ; wider difference
-    ///     ld  M[ls.lo]
+    ///     ldx M[r.lo]             ; wider difference
+    ///     ld  M[l.lo]
     ///     jge x -> nb
     ///     ld  #1
     ///     ja  borrow
     /// nb: ld  #0
     /// borrow:
     ///     tax
-    ///     ld  M[ls.hi]
+    ///     ld  M[l.hi]
     ///     sub x
-    ///     ldx M[rs.hi]
+    ///     ldx M[r.hi]
     ///     sub x
-    ///     st  M[slot.hi]
-    ///     ldx M[rs.lo]
-    ///     ld  M[ls.lo]
+    ///     st  M[l.hi]
+    ///     ldx M[r.lo]
+    ///     ld  M[l.lo]
     ///     sub x
-    ///     st  M[slot.lo]
+    ///     st  M[l.lo]
     ///
-    ///     ldx M[rs.lo]            ; wider bitwise result
-    ///     ld  M[ls.lo]
+    ///     ldx M[r.lo]             ; wider bitwise result
+    ///     ld  M[l.lo]
     ///     <op> x
-    ///     st  M[slot.lo]
-    ///     ldx M[rs.hi]
-    ///     ld  M[ls.hi]
+    ///     st  M[l.lo]
+    ///     ldx M[r.hi]
+    ///     ld  M[l.hi]
     ///     <op> x
-    ///     st  M[slot.hi]
+    ///     st  M[l.hi]
     ///
     ///     <normalize>
     /// ```
-    fn emit_pairs(self, b: &mut Builder, arch: Arch, ty: PrimType, ls: u32, rs: u32, slot: u32)
-        requires
-            old(b).wf(), 0 < old(b).rev@.len(), ty.wf(),
-            ls < 8, rs < 8, slot < 8, ls != rs, slot == ls || slot == rs,
+    fn emit_pairs(self, b: &mut Builder, arch: Arch, ty: PrimType, slot: u32)
+        requires old(b).wf(), 0 < old(b).rev@.len(), ty.wf(), slot + 1 < 8
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            forall |data: &[u8], t: Regs, pl: u64, pr: u64| t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr)
+            forall |data: &[u8], t: Regs, pl: u64, pr: u64| t.wf() && t.holds(slot as nat, pl) && t.holds((slot + 1) as nat, pr)
                 ==> #[trigger] Builder::stores(final(b).rev@, data, final(b).rev@.len(), t, old(b).rev@.len(),
                     slot as nat, ty.norm(arch, self.apply(pl, pr))),
     {
@@ -1443,45 +1353,38 @@ impl BinOp {
         let ghost base = b.rev@;
         ty.emit_norm(b, arch, slot);
         let ghost r_norm = b.rev@;
-        let (l0, l1, r0, r1, d0, d1) = (2 * ls, 2 * ls + 1, 2 * rs, 2 * rs + 1, 2 * slot, 2 * slot + 1);
-        if !wide {
-            let block = [Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(self.alu(), Src::X), Instr::St(d0)];
-            proof { reveal_with_fuel(Instr::fits_from, 5); }
-            b.emit_block(&block);
-            proof { assert(block@ == self.block(wide, ls, rs, slot)); }
+        let (l0, l1, r0, r1) = (2 * slot, 2 * slot + 1, 2 * slot + 2, 2 * slot + 3);
+        let op = self.alu();
+        let block: &[Instr] = if !wide {
+            &[Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(op, Src::X), Instr::St(l0)]
         } else if self == BinOp::Add {
-            let block = [Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X),
+            &[Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X),
                 Instr::Jmp { op: JmpOp::Ge, src: Src::X, jt: 2, jf: 0 },
                 Instr::LdImm(1), Instr::Ja(1), Instr::LdImm(0),
                 Instr::Tax, Instr::LdMem(l1), Instr::Alu(AluOp::Add, Src::X),
-                Instr::LdxMem(r1), Instr::Alu(AluOp::Add, Src::X), Instr::St(d1),
-                Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X), Instr::St(d0)];
-            proof { reveal_with_fuel(Instr::fits_from, 18); }
-            b.emit_block(&block);
-            proof { assert(block@ == self.block(wide, ls, rs, slot)); }
+                Instr::LdxMem(r1), Instr::Alu(AluOp::Add, Src::X), Instr::St(l1),
+                Instr::LdxMem(l0), Instr::LdMem(r0), Instr::Alu(AluOp::Add, Src::X), Instr::St(l0)]
         } else if self == BinOp::Sub {
-            let block = [Instr::LdxMem(r0), Instr::LdMem(l0),
+            &[Instr::LdxMem(r0), Instr::LdMem(l0),
                 Instr::Jmp { op: JmpOp::Ge, src: Src::X, jt: 2, jf: 0 },
                 Instr::LdImm(1), Instr::Ja(1), Instr::LdImm(0),
                 Instr::Tax, Instr::LdMem(l1), Instr::Alu(AluOp::Sub, Src::X),
-                Instr::LdxMem(r1), Instr::Alu(AluOp::Sub, Src::X), Instr::St(d1),
-                Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(AluOp::Sub, Src::X), Instr::St(d0)];
-            proof { reveal_with_fuel(Instr::fits_from, 17); }
-            b.emit_block(&block);
-            proof { assert(block@ == self.block(wide, ls, rs, slot)); }
+                Instr::LdxMem(r1), Instr::Alu(AluOp::Sub, Src::X), Instr::St(l1),
+                Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(AluOp::Sub, Src::X), Instr::St(l0)]
         } else {
-            let op = self.alu();
-            let block = [Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(op, Src::X), Instr::St(d0),
-                Instr::LdxMem(r1), Instr::LdMem(l1), Instr::Alu(op, Src::X), Instr::St(d1)];
-            proof { reveal_with_fuel(Instr::fits_from, 9); }
-            b.emit_block(&block);
-            proof { assert(block@ == self.block(wide, ls, rs, slot)); }
-        }
+            &[Instr::LdxMem(r0), Instr::LdMem(l0), Instr::Alu(op, Src::X), Instr::St(l0),
+                Instr::LdxMem(r1), Instr::LdMem(l1), Instr::Alu(op, Src::X), Instr::St(l1)]
+        };
         proof {
-            assert forall |data: &[u8], t: Regs, pl: u64, pr: u64| t.wf() && t.holds(ls as nat, pl) && t.holds(rs as nat, pr)
+            assert(block@ == self.block(wide, slot));
+            reveal_with_fuel(Instr::fits_from, 18);
+        }
+        b.emit_block(block);
+        proof {
+            assert forall |data: &[u8], t: Regs, pl: u64, pr: u64| t.wf() && t.holds(slot as nat, pl) && t.holds((slot + 1) as nat, pr)
                 implies #[trigger] Builder::stores(b.rev@, data, b.rev@.len(), t, base.len(), slot as nat,
                     ty.norm(arch, self.apply(pl, pr))) by {
-                let u = self.lemma_run(wide, ls, rs, slot, data, t, pl, pr);
+                let u = self.lemma_run(wide, slot, data, t, pl, pr);
                 assert(Builder::goes(b.rev@, data, b.rev@.len(), t, r_norm.len(), u));
                 assert(Builder::stores(r_norm, data, r_norm.len(), u, base.len(), slot as nat, ty.norm(arch, self.apply(pl, pr))));
                 Builder::lemma_stores_then(r_norm, b.rev@, data, b.rev@.len(), t, r_norm.len(), u,

@@ -229,7 +229,7 @@ impl Rule {
 
 impl Rule {
     /// Emits the test that reaches this rule at syscall number `nr`, and the rule's
-    /// body under it, with multiplexer selector `sel`.
+    /// body under it, with multiplexer selector and mask `sel`.
     ///
     /// Forward layout, entered with `A` holding `seccomp_data.nr`:
     ///
@@ -239,7 +239,7 @@ impl Rule {
     ///     ld  [nr]            ; hands A back to the test behind this one
     /// end:
     /// ```
-    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, sel: Option<u32>) -> (res: Result<(), CompileError>)
+    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, sel: Option<(u32, u32)>) -> (res: Result<(), CompileError>)
         requires
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
             0 < b.rev@.len(),
@@ -298,7 +298,7 @@ impl Rule {
     }
 
     /// Emits whatever this rule tests beyond the syscall number, then its action: the
-    /// multiplexer selector `sel` if there is one, and the condition otherwise.
+    /// multiplexer selector and mask `sel` if there are any, and the condition otherwise.
     ///
     /// Forward layout, with `end` just past the body:
     ///
@@ -311,12 +311,12 @@ impl Rule {
     /// With a selector, it is the only test:
     /// ```text
     ///     ld  [arg 0]
-    ///     and #0xffff         ; ipc only
+    ///     and #mask           ; mask != 0xffffffff
     ///     jne #selector -> end
     ///     ret #action
     /// end:
     /// ```
-    fn emit_body(&self, b: &mut Builder, arch: Arch, sel: Option<u32>) -> (res: Result<(), CompileError>)
+    fn emit_body(&self, b: &mut Builder, arch: Arch, sel: Option<(u32, u32)>) -> (res: Result<(), CompileError>)
         requires
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
             0 < b.rev@.len(),
@@ -343,8 +343,7 @@ impl Rule {
             }
         }
 
-        if let Some(arg) = sel {
-            let mask: u32 = if self.syscall.ipc_arg().is_some() { 0xFFFF } else { u32::MAX };
+        if let Some((arg, mask)) = sel {
             b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
             let ghost r_sel = b.rev@;
             b.emit_load(Policy::OFFSET_EVENT_ARGS, mask, 0);
@@ -363,10 +362,9 @@ impl Rule {
                     Event::lemma_image(data);
                     assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
                         == (arg0 & 0xFFFF_FFFF) as u32);
-                    assert((arg0 & 0xFFFF) as u32 == ((arg0 & 0xFFFF_FFFF) as u32) & 0xFFFF)
+                    assert((arg0 & (mask as u64)) as u32 == ((arg0 & 0xFFFF_FFFF) as u32) & mask)
                         by (bit_vector);
-                    assert((w & u32::MAX) ^ 0u32 == w) by (bit_vector);
-                    assert((w & 0xFFFF) ^ 0u32 == w & 0xFFFF) by (bit_vector);
+                    assert((w & mask) ^ 0u32 == w & mask) by (bit_vector);
                     let got = Regs { a: (w & mask) ^ 0, ..r };
                     assert(self.body_holds(arch, sel, Event::of(data)) <==> got.a == arg);
                     let to = if got.a == arg { r_ret.len() } else { end as nat };
@@ -421,74 +419,39 @@ impl Rule {
         Ok(())
     }
 
-    /// The call number the x86 multiplexer selects this rule's syscall on, if one
-    /// reaches it.
-    pub(super) open spec fn spec_mux_arg(&self, arch: Arch) -> Option<u32> {
-        if arch != Arch::X86 || self.no_mux {
-            None
-        } else {
-            match self.syscall.to_socketcall_arg() {
-                Some(arg) => Some(arg as u32),
-                None => match self.syscall.to_ipc_arg() {
-                    Some(arg) => Some(arg as u32),
-                    None => None,
-                },
-            }
-        }
-    }
-
-    /// Executable version of [`Rule::spec_mux_arg`].
-    #[verifier::when_used_as_spec(spec_mux_arg)]
-    fn mux_arg(&self, arch: Arch) -> (res: Option<u32>)
-        ensures res == self.spec_mux_arg(arch)
-    {
-        if arch != Arch::X86 || self.no_mux {
-            return None;
-        }
-        match self.syscall.socketcall_arg() {
-            Some(arg) => Some(arg as u32),
-            None => self.syscall.ipc_arg().map(|arg: u64| -> (res: u32)
-                ensures res == arg as u32
-            { arg as u32 }),
-        }
-    }
-
-    /// The number of the x86 multiplexer that also reaches this rule, if one does.
-    pub(super) open spec fn spec_mux_nr(&self, arch: Arch) -> Option<u32> {
-        if arch != Arch::X86 || self.no_mux
-            || self.syscall.to_socketcall_arg() is None && self.syscall.to_ipc_arg() is None {
-            None
-        } else {
-            let mux = if self.syscall.to_socketcall_arg() is Some {
-                Syscall::Socketcall
-            } else {
-                Syscall::Ipc
-            };
-            match mux.spec_nr(arch) {
-                Some(nr) => Some(nr as u32),
+    /// The x86 multiplexer that also reaches this rule, if one does: its syscall number,
+    /// the call number it selects this rule's syscall on, and the mask it reads that with.
+    pub(super) open spec fn spec_mux(&self, arch: Arch) -> Option<(u32, u32, u32)> {
+        let sel = match self.syscall.to_socketcall_arg() {
+            Some(arg) => Some((Syscall::Socketcall, arg, u32::MAX)),
+            None => match self.syscall.to_ipc_arg() {
+                Some(arg) => Some((Syscall::Ipc, arg, 0xFFFFu32)),
                 None => None,
-            }
+            },
+        };
+        match sel {
+            Some((mux, arg, mask)) if arch == Arch::X86 && !self.no_mux => match mux.spec_nr(arch) {
+                Some(nr) => Some((nr as u32, arg as u32, mask)),
+                None => None,
+            },
+            _ => None,
         }
     }
 
-    /// Executable version of [`Rule::spec_mux_nr`].
-    #[verifier::when_used_as_spec(spec_mux_nr)]
-    pub(super) fn mux_nr(&self, arch: Arch) -> (res: Option<u32>)
-        ensures res == self.spec_mux_nr(arch)
+    /// Executable version of [`Rule::spec_mux`].
+    fn mux(&self, arch: Arch) -> (res: Option<(u32, u32, u32)>)
+        ensures res == self.spec_mux(arch)
     {
         if arch != Arch::X86 || self.no_mux {
             return None;
         }
-        let mux = if self.syscall.socketcall_arg().is_some() {
-            Syscall::Socketcall
-        } else if self.syscall.ipc_arg().is_some() {
-            Syscall::Ipc
-        } else {
-            return None;
+        let (mux, arg, mask) = match self.syscall.socketcall_arg() {
+            Some(arg) => (Syscall::Socketcall, arg, u32::MAX),
+            None => (Syscall::Ipc, self.syscall.ipc_arg()?, 0xFFFF),
         };
-        mux.nr(arch).map(|nr: i32| -> (res: u32)
-            ensures res == nr as u32
-        { nr as u32 })
+        mux.nr(arch).map(|nr: i32| -> (res: (u32, u32, u32))
+            ensures res == (nr as u32, arg as u32, mask)
+        { (nr as u32, arg as u32, mask) })
     }
 }
 
@@ -515,8 +478,8 @@ impl Rule {
                     old(b).rev@.len(), Event::of(data).nr as u32),
     {
         let ghost prev = b.rev@;
-        if let Some(nr) = self.mux_nr(arch) {
-            self.emit(b, arch, nr, self.mux_arg(arch))?;
+        if let Some((nr, arg, mask)) = self.mux(arch) {
+            self.emit(b, arch, nr, Some((arg, mask)))?;
         }
         let ghost mux = b.rev@;
         if let Some(nr) = self.syscall.bpf_nr(arch) {
