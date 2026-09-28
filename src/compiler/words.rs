@@ -74,17 +74,6 @@ impl Event {
                 by (bit_vector);
         }
     }
-
-    /// Unsigned filter comparisons preserve syscall-number equality.
-    pub(super) proof fn lemma_nr(self)
-        ensures
-            forall |nr: i32| #[trigger] (nr as u32) == self.nr as u32 ==> nr == self.nr,
-    {
-        let m = self.nr;
-        assert forall |nr: i32| #[trigger] (nr as u32) == m as u32 implies nr == m by {
-            assert((nr as u32) == (m as u32) ==> nr == m) by (bit_vector);
-        }
-    }
 }
 
 } // verus!

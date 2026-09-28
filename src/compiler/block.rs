@@ -5,6 +5,8 @@ use vstd::prelude::*;
 use crate::spec::{policy::*, cbpf::*};
 use super::CompileError;
 use super::builder::{Builder, Label};
+#[allow(unused_imports)]
+use super::machine::Regs;
 
 verus! {
 
@@ -35,18 +37,13 @@ impl Arch {
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
                 && self.matches_event(Event::of(data)) ==>
-                #[trigger] Builder::goes_to_all(final(b).rev@, data, final(b).rev@.len(),
+                #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r,
                     old(b).rev@.len(), Event::of(data).nr as u32),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && Event::of(data).arch != self.token() ==>
-                #[trigger] Builder::goes_to_all(final(b).rev@, data, final(b).rev@.len(),
-                    end as nat, Event::of(data).arch),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && Event::of(data).arch == self.token() && !self.matches_event(Event::of(data)) ==>
-                #[trigger] Builder::goes_to_all(final(b).rev@, data, final(b).rev@.len(),
-                    end as nat, Event::of(data).nr as u32),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && !self.matches_event(Event::of(data)) ==>
+                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), r, end as nat),
     {
         let ghost body = b.rev@;
         if self == Arch::X86_64 {
@@ -55,39 +52,15 @@ impl Arch {
             let ghost x32_guard = b.rev@;
             b.emit_jump(JmpOp::Eq, Src::K(u32::MAX), true, skip)?;
             proof {
-                assert forall |data: &[u8], signed_nr: i32|
-                    signed_nr & 0x4000_0000 == 0 || signed_nr == -1 implies
-                    #[trigger] Builder::goes_to(b.rev@, data, b.rev@.len(), signed_nr as u32,
-                        body.len(), signed_nr as u32) by {
-                    let nr = signed_nr as u32;
-                    assert(((signed_nr as u32) & 0x4000_0000 == 0)
-                        <==> (signed_nr & 0x4000_0000 == 0)) by (bit_vector);
-                    assert(((signed_nr as u32) == u32::MAX) <==> (signed_nr == -1))
-                        by (bit_vector);
-                    if signed_nr != -1 {
-                        assert(Builder::goes_to(b.rev@, data, b.rev@.len(), nr,
-                            x32_guard.len(), nr));
-                        assert(Builder::goes_to(x32_guard, data, x32_guard.len(), nr,
-                            body.len(), nr));
-                        Builder::lemma_then(x32_guard, b.rev@, data, b.rev@.len(), nr,
-                            x32_guard.len(), nr, body.len(), nr);
-                    }
-                }
-                assert forall |data: &[u8], signed_nr: i32|
-                    signed_nr & 0x4000_0000 != 0 && signed_nr != -1 implies
-                    #[trigger] Builder::goes_to(b.rev@, data, b.rev@.len(), signed_nr as u32,
-                        end as nat, signed_nr as u32) by {
-                    let nr = signed_nr as u32;
-                    assert(((signed_nr as u32) & 0x4000_0000 == 0)
-                        <==> (signed_nr & 0x4000_0000 == 0)) by (bit_vector);
-                    assert(((signed_nr as u32) == u32::MAX) <==> (signed_nr == -1))
-                        by (bit_vector);
-                    assert(Builder::goes_to(b.rev@, data, b.rev@.len(), nr,
-                        x32_guard.len(), nr));
-                    assert(Builder::goes_to(x32_guard, data, x32_guard.len(), nr,
-                        end as nat, nr));
-                    Builder::lemma_then(x32_guard, b.rev@, data, b.rev@.len(), nr,
-                        x32_guard.len(), nr, end as nat, nr);
+                assert forall |data: &[u8], r: Regs|
+                    #![trigger Builder::goes(b.rev@, data, b.rev@.len(), r, body.len(), r)]
+                    #![trigger Builder::goes(b.rev@, data, b.rev@.len(), r, end as nat, r)]
+                    r.a != u32::MAX implies Builder::goes(b.rev@, data, b.rev@.len(), r,
+                        if r.a & 0x4000_0000 == 0 { body.len() } else { end as nat }, r) by {
+                    let to = if r.a & 0x4000_0000 == 0 { body.len() } else { end as nat };
+                    assert(Builder::goes(x32_guard, data, x32_guard.len(), r, to, r));
+                    Builder::lemma_goes_trans(x32_guard, b.rev@, data, b.rev@.len(), r,
+                        x32_guard.len(), r, to, r);
                 }
             }
         }
@@ -100,36 +73,38 @@ impl Arch {
         b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_ARCH));
         proof {
             Builder::lemma_ld(b.rev@, Policy::OFFSET_EVENT_ARCH);
-            assert forall |data: &[u8], a: u32|
-                #![trigger Builder::goes_to(b.rev@, data, b.rev@.len(), a, body.len(), Event::of(data).nr as u32)]
-                #![trigger Builder::goes_to(b.rev@, data, b.rev@.len(), a, end as nat, Event::of(data).arch)]
-                #![trigger Builder::goes_to(b.rev@, data, b.rev@.len(), a, end as nat, Event::of(data).nr as u32)]
-                Event::parse(data) is Some implies
+            assert forall |data: &[u8], r: Regs|
+                #![trigger Builder::passes(b.rev@, data, b.rev@.len(), r, body.len(), Event::of(data).nr as u32)]
+                #![trigger Builder::lands(b.rev@, data, b.rev@.len(), r, end as nat)]
+                Event::parse(data) is Some && r.wf() implies
                 if self.matches_event(Event::of(data)) {
-                    Builder::goes_to(b.rev@, data, b.rev@.len(), a,
-                        body.len(), Event::of(data).nr as u32)
-                } else if Event::of(data).arch == self.token() {
-                    Builder::goes_to(b.rev@, data, b.rev@.len(), a,
-                        end as nat, Event::of(data).nr as u32)
+                    Builder::passes(b.rev@, data, b.rev@.len(), r, body.len(), Event::of(data).nr as u32)
                 } else {
-                    Builder::goes_to(b.rev@, data, b.rev@.len(), a,
-                        end as nat, Event::of(data).arch)
+                    Builder::lands(b.rev@, data, b.rev@.len(), r, end as nat)
                 } by {
                 let ev = Event::of(data);
-                let nr = ev.nr as u32;
-                let to = if self.matches_event(ev) { body.len() } else { end as nat };
                 Event::lemma_image(data);
+                let ra = Regs { a: ev.arch, ..r };
+                let rn = Regs { a: ev.nr as u32, ..r };
+                assert(Builder::goes(b.rev@, data, b.rev@.len(), r, guarded_arch.len(), ra));
+                let to = if self.matches_event(ev) { body.len() } else { end as nat };
                 if ev.arch == self.token() {
-                    assert(Builder::goes_to(guarded_nr, data, guarded_nr.len(), nr, to, nr));
-                    Builder::lemma_then(guarded_nr, loaded_nr, data, loaded_nr.len(), ev.arch,
-                        guarded_nr.len(), nr, to, nr);
-                    Builder::lemma_then(loaded_nr, guarded_arch, data, guarded_arch.len(), ev.arch,
-                        loaded_nr.len(), ev.arch, to, nr);
-                    Builder::lemma_then(guarded_arch, b.rev@, data, b.rev@.len(), a,
-                        guarded_arch.len(), ev.arch, to, nr);
+                    let nr = ev.nr;
+                    assert(((nr as u32) & 0x4000_0000 == 0) <==> (nr & 0x4000_0000 == 0)) by (bit_vector);
+                    assert(((nr as u32) == u32::MAX) <==> (nr == -1)) by (bit_vector);
+                    assert(Builder::goes(guarded_nr, data, guarded_nr.len(), rn, to, rn));
+                    assert(Builder::goes(loaded_nr, data, loaded_nr.len(), ra, guarded_nr.len(), rn));
+                    Builder::lemma_goes_trans(guarded_nr, loaded_nr, data, loaded_nr.len(), ra,
+                        guarded_nr.len(), rn, to, rn);
+                    assert(Builder::goes(guarded_arch, data, guarded_arch.len(), ra, loaded_nr.len(), ra));
+                    Builder::lemma_goes_trans(loaded_nr, guarded_arch, data, guarded_arch.len(), ra,
+                        loaded_nr.len(), ra, to, rn);
+                    Builder::lemma_goes_trans(guarded_arch, b.rev@, data, b.rev@.len(), r,
+                        guarded_arch.len(), ra, to, rn);
                 } else {
-                    Builder::lemma_then(guarded_arch, b.rev@, data, b.rev@.len(), a,
-                        guarded_arch.len(), ev.arch, to, ev.arch);
+                    assert(Builder::goes(guarded_arch, data, guarded_arch.len(), ra, end as nat, ra));
+                    Builder::lemma_goes_trans(guarded_arch, b.rev@, data, b.rev@.len(), r,
+                        guarded_arch.len(), ra, end as nat, ra);
                 }
             }
         }
@@ -208,14 +183,18 @@ impl Policy {
                 let want = if arch.matches_event(ev) {
                     self.dispatch(arch, ev, 7, self.rules@.len() as int).to_ret()
                 } else { tail.to_ret() };
-                assert forall |a: u32| #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), a, want) by {
+                assert forall |r: Regs| r.wf() implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, want) by {
                     if arch.matches_event(ev) {
-                        assert(Builder::goes_to_all(b.rev@, data, b.rev@.len(), body.len(), ev.nr as u32));
-                        Builder::lemma_then(body, b.rev@, data, b.rev@.len(), a, body.len(), ev.nr as u32, 0, want);
+                        assert(Builder::passes(b.rev@, data, b.rev@.len(), r, body.len(), ev.nr as u32));
+                        let t = choose |t: Regs| t.wf() && t.a == ev.nr as u32
+                            && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, body.len(), t);
+                        Builder::lemma_then(body, b.rev@, data, b.rev@.len(), r, body.len(), t, 0, want);
                     } else {
-                        let acc = if ev.arch == arch.token() { ev.nr as u32 } else { ev.arch };
-                        assert(Builder::goes_to_all(b.rev@, data, b.rev@.len(), prev.len(), acc));
-                        Builder::lemma_then(prev, b.rev@, data, b.rev@.len(), a, prev.len(), acc, 0, want);
+                        assert(Builder::lands(b.rev@, data, b.rev@.len(), r, prev.len()));
+                        let t = choose |t: Regs| t.wf()
+                            && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, prev.len(), t);
+                        assert(Builder::returns(prev, data, prev.len(), t, want));
+                        Builder::lemma_then(prev, b.rev@, data, b.rev@.len(), r, prev.len(), t, 0, want);
                     }
                 }
             }
@@ -229,9 +208,9 @@ impl Policy {
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some ==>
-                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(),
-                    Event::of(data).nr as u32,
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 ==>
+                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r,
                     self.dispatch(arch, Event::of(data), 7, self.rules@.len() as int).to_ret()),
     {
         b.emit(Instr::Ret(RetVal::K(self.act_no_match.exec_to_ret())));
@@ -239,8 +218,9 @@ impl Policy {
         // The builder runs backward: low precedence and early rules are emitted first.
         let mut priority: u8 = 0;
         proof {
-            assert forall |data: &[u8]| Event::parse(data) is Some implies
-                #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+            assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 implies
+                #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                     self.dispatch(arch, Event::of(data), -1, self.rules@.len() as int).to_ret()) by {
                 assert(Builder::returns_all(b.rev@, data, b.rev@.len(), self.act_no_match.to_ret()));
             }
@@ -251,17 +231,19 @@ impl Policy {
                 self.archs@.contains(arch),
                 self.wf(), b.wf(), 0 < b.rev@.len(),
                 Builder::extends(old(b).rev@, b.rev@),
-                forall |data: &[u8]| Event::parse(data) is Some ==>
-                    #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                    && r.a == Event::of(data).nr as u32 ==>
+                    #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                         self.dispatch(arch, Event::of(data), priority - 1, self.rules@.len() as int).to_ret()),
             decreases 8 - priority
         {
             let mut i: usize = 0;
             proof {
-                assert forall |data: &[u8]| Event::parse(data) is Some implies
-                    #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                    && r.a == Event::of(data).nr as u32 implies
+                    #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                         self.dispatch(arch, Event::of(data), priority as int, 0).to_ret()) by {
-                    assert(Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                    assert(Builder::returns(b.rev@, data, b.rev@.len(), r,
                         self.dispatch(arch, Event::of(data), priority - 1, self.rules@.len() as int).to_ret()));
                 }
             }
@@ -272,8 +254,9 @@ impl Policy {
                     self.archs@.contains(arch),
                     self.wf(), b.wf(), 0 < b.rev@.len(),
                     Builder::extends(old(b).rev@, b.rev@),
-                    forall |data: &[u8]| Event::parse(data) is Some ==>
-                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                    forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                        && r.a == Event::of(data).nr as u32 ==>
+                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                             self.dispatch(arch, Event::of(data), priority as int, i as int).to_ret()),
                 decreases self.rules@.len() - i
             {
@@ -288,17 +271,20 @@ impl Policy {
                     self.rules[i].emit_tests(b, arch)?;
                 }
                 proof {
-                    assert forall |data: &[u8]| Event::parse(data) is Some implies
-                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                    assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                        && r.a == Event::of(data).nr as u32 implies
+                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                             self.dispatch(arch, Event::of(data), priority as int, i + 1).to_ret()) by {
                         let ev = Event::of(data);
                         let nr = ev.nr as u32;
                         let want = self.dispatch(arch, ev, priority as int, i + 1).to_ret();
-                        if rule.action.precedence() != priority || !rule.eval(arch, ev) {
-                            assert(Builder::goes_to(b.rev@, data, b.rev@.len(), nr, prev.len(), nr));
-                            assert(Builder::returns(prev, data, prev.len(), nr,
+                        if rule.action.precedence() == priority && !rule.eval(arch, ev) {
+                            assert(Builder::passes(b.rev@, data, b.rev@.len(), r, prev.len(), nr));
+                            let t = choose |t: Regs| t.wf() && t.a == nr
+                                && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, prev.len(), t);
+                            assert(Builder::returns(prev, data, prev.len(), t,
                                 self.dispatch(arch, ev, priority as int, i as int).to_ret()));
-                            Builder::lemma_then(prev, b.rev@, data, b.rev@.len(), nr, prev.len(), nr, 0, want);
+                            Builder::lemma_then(prev, b.rev@, data, b.rev@.len(), r, prev.len(), t, 0, want);
                         }
                     }
                 }
@@ -307,10 +293,11 @@ impl Policy {
             priority += 1;
         }
         proof {
-            assert forall |data: &[u8]| Event::parse(data) is Some implies
-                #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+            assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 implies
+                #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r,
                     self.dispatch(arch, Event::of(data), 7, self.rules@.len() as int).to_ret()) by {
-                assert(Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
+                assert(Builder::returns(b.rev@, data, b.rev@.len(), r,
                     self.dispatch(arch, Event::of(data), priority - 1, self.rules@.len() as int).to_ret()));
             }
         }

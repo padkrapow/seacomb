@@ -4,6 +4,8 @@ use vstd::prelude::*;
 use crate::spec::{policy::*, syscall::*, cbpf::*, expr::*};
 use super::CompileError;
 use super::builder::Builder;
+#[allow(unused_imports)]
+use super::machine::Regs;
 
 verus! {
 
@@ -227,7 +229,7 @@ impl Rule {
 
 impl Rule {
     /// Emits the test that reaches this rule at syscall number `nr`, and the rule's
-    /// body under it.
+    /// body under it, with multiplexer selector `sel`.
     ///
     /// Forward layout, entered with `A` holding `seccomp_data.nr`:
     ///
@@ -237,7 +239,7 @@ impl Rule {
     ///     ld  [nr]            ; hands A back to the test behind this one
     /// end:
     /// ```
-    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32) -> (res: Result<(), CompileError>)
+    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, sel: Option<u32>) -> (res: Result<(), CompileError>)
         requires
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
             0 < b.rev@.len(),
@@ -245,58 +247,58 @@ impl Rule {
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && self.matches_at(arch, nr, Event::of(data)) ==>
-                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(),
-                    Event::of(data).nr as u32, self.action.to_ret()),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && !self.matches_at(arch, nr, Event::of(data)) ==>
-                #[trigger] Builder::goes_to(final(b).rev@, data, final(b).rev@.len(),
-                    Event::of(data).nr as u32, old(b).rev@.len(), Event::of(data).nr as u32),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 && self.matches_at(arch, nr, sel, Event::of(data)) ==>
+                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 && !self.matches_at(arch, nr, sel, Event::of(data)) ==>
+                #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r,
+                    old(b).rev@.len(), Event::of(data).nr as u32),
     {
         let end = b.label();
         b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_NR));
         proof { Builder::lemma_ld(b.rev@, Policy::OFFSET_EVENT_NR); }
         let ghost r_nr = b.rev@;
-        self.emit_body(b, arch, nr)?;
+        self.emit_body(b, arch, sel)?;
         let ghost r_body = b.rev@;
         b.emit_jump(JmpOp::Eq, Src::K(nr), false, end)?;
         proof {
-            assert forall |data: &[u8]|
-                #![trigger Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32, self.action.to_ret())]
-                #![trigger Builder::goes_to(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
-                    end as nat, Event::of(data).nr as u32)]
-                Event::parse(data) is Some implies
-                if self.matches_at(arch, nr, Event::of(data)) {
-                    Builder::returns(b.rev@, data, b.rev@.len(),
-                        Event::of(data).nr as u32, self.action.to_ret())
+            assert forall |data: &[u8], r: Regs|
+                #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
+                #![trigger Builder::passes(b.rev@, data, b.rev@.len(), r, end as nat, Event::of(data).nr as u32)]
+                Event::parse(data) is Some && r.wf() && r.a == Event::of(data).nr as u32 implies
+                if self.matches_at(arch, nr, sel, Event::of(data)) {
+                    Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())
                 } else {
-                    Builder::goes_to(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
-                        end as nat, Event::of(data).nr as u32)
+                    Builder::passes(b.rev@, data, b.rev@.len(), r, end as nat, Event::of(data).nr as u32)
                 } by {
                 let ev = Event::of(data);
                 Event::lemma_image(data);
                 if ev.nr as u32 == nr {
-                    assert(Builder::goes_to(b.rev@, data, b.rev@.len(), nr, r_body.len(), nr));
-                    if self.body_holds(arch, nr, ev) {
-                        assert(Builder::returns(r_body, data, r_body.len(), nr, self.action.to_ret()));
-                        Builder::lemma_then(r_body, b.rev@, data, b.rev@.len(), nr, r_body.len(), nr,
+                    assert(Builder::goes(b.rev@, data, b.rev@.len(), r, r_body.len(), r));
+                    if self.body_holds(arch, sel, ev) {
+                        Builder::lemma_then(r_body, b.rev@, data, b.rev@.len(), r, r_body.len(), r,
                             0, self.action.to_ret());
                     } else {
-                        assert(Builder::lands(r_body, data, r_body.len(), nr, r_nr.len()));
-                        assert(Builder::goes_to_all(r_nr, data, r_nr.len(), end as nat, nr));
-                        Builder::lemma_then_any(r_nr, r_body, data, r_body.len(), nr, r_nr.len(),
-                            end as nat, nr);
-                        Builder::lemma_then(r_body, b.rev@, data, b.rev@.len(), nr, r_body.len(), nr,
-                            end as nat, nr);
+                        assert(Builder::lands(r_body, data, r_body.len(), r, r_nr.len()));
+                        let t = choose |t: Regs| t.wf()
+                            && #[trigger] Builder::goes(r_body, data, r_body.len(), r, r_nr.len(), t);
+                        assert(Builder::goes(r_nr, data, r_nr.len(), t, end as nat, Regs { a: ev.nr as u32, ..t }));
+                        Builder::lemma_then(r_nr, r_body, data, r_body.len(), r, r_nr.len(), t,
+                            end as nat, ev.nr as u32);
+                        Builder::lemma_then(r_body, b.rev@, data, b.rev@.len(), r, r_body.len(), r,
+                            end as nat, ev.nr as u32);
                     }
+                } else {
+                    assert(Builder::goes(b.rev@, data, b.rev@.len(), r, end as nat, r));
                 }
             }
         }
         Ok(())
     }
 
-    /// Emits whatever this rule tests beyond the syscall number, then its action.
+    /// Emits whatever this rule tests beyond the syscall number, then its action: the
+    /// multiplexer selector `sel` if there is one, and the condition otherwise.
     ///
     /// Forward layout, with `end` just past the body:
     ///
@@ -306,8 +308,7 @@ impl Rule {
     ///     ret #action
     /// end:
     /// ```
-    /// Reached through a multiplexer, the rule's own syscall is what the multiplexer
-    /// selects on, and that selector is the only test:
+    /// With a selector, it is the only test:
     /// ```text
     ///     ld  [arg 0]
     ///     and #0xffff         ; ipc only
@@ -315,7 +316,7 @@ impl Rule {
     ///     ret #action
     /// end:
     /// ```
-    fn emit_body(&self, b: &mut Builder, arch: Arch, nr: u32) -> (res: Result<(), CompileError>)
+    fn emit_body(&self, b: &mut Builder, arch: Arch, sel: Option<u32>) -> (res: Result<(), CompileError>)
         requires
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
             0 < b.rev@.len(),
@@ -323,14 +324,12 @@ impl Rule {
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.body_holds(arch, nr, Event::of(data)) ==>
-                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(),
-                    a, self.action.to_ret()),
-            res is Ok ==> forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.body_holds(arch, nr, Event::of(data)) ==>
-                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(),
-                    a, old(b).rev@.len()),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && self.body_holds(arch, sel, Event::of(data)) ==>
+                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && !self.body_holds(arch, sel, Event::of(data)) ==>
+                #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), r, old(b).rev@.len()),
     {
         let end = b.label();
         let ghost base = b.rev@;
@@ -338,49 +337,48 @@ impl Rule {
         let ghost r_ret = b.rev@;
         proof {
             Builder::lemma_ret(r_ret, self.action.to_ret());
-            assert forall |data: &[u8], a: u32| #[trigger] Builder::returns(r_ret, data,
-                r_ret.len(), a, self.action.to_ret()) by {
+            assert forall |data: &[u8], r: Regs| r.wf() implies #[trigger] Builder::returns(r_ret, data,
+                r_ret.len(), r, self.action.to_ret()) by {
                 assert(Builder::returns_all(r_ret, data, r_ret.len(), self.action.to_ret()));
             }
         }
 
-        if let Some(arg) = self.mux_arg(arch) {
-            if self.mux_nr(arch) == Some(nr) {
-                let mask: u32 = if self.syscall.ipc_arg().is_some() { 0xFFFF } else { u32::MAX };
-                b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
-                let ghost r_sel = b.rev@;
-                b.emit_load(Policy::OFFSET_EVENT_ARGS, mask, 0);
-                proof {
-                    assert forall |data: &[u8], a: u32|
-                        #![trigger Builder::returns(b.rev@, data, b.rev@.len(), a, self.action.to_ret())]
-                        #![trigger Builder::lands(b.rev@, data, b.rev@.len(), a, base.len())]
-                        Event::parse(data) is Some implies
-                        if self.body_holds(arch, nr, Event::of(data)) {
-                            Builder::returns(b.rev@, data, b.rev@.len(), a, self.action.to_ret())
-                        } else {
-                            Builder::lands(b.rev@, data, b.rev@.len(), a, base.len())
-                        } by {
-                        let arg0 = Event::of(data).args[0];
-                        let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
-                        Event::lemma_image(data);
-                        assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
-                            == (arg0 & 0xFFFF_FFFF) as u32);
-                        Self::lemma_ipc_selector(arg0);
-                        assert((w & u32::MAX) ^ 0u32 == w) by (bit_vector);
-                        assert((w & 0xFFFF) ^ 0u32 == w & 0xFFFF) by (bit_vector);
-                        let sel = (w & mask) ^ 0;
-                        assert(self.body_holds(arch, nr, Event::of(data)) <==> sel == arg);
-                        if self.body_holds(arch, nr, Event::of(data)) {
-                            assert(Builder::goes_to(r_ret, data, r_ret.len(), sel, r_ret.len(), sel));
-                            assert(Builder::lands(r_sel, data, r_sel.len(), sel, r_ret.len()));
-                            assert(Builder::lands(b.rev@, data, b.rev@.len(), a, r_ret.len()));
-                            Builder::lemma_then_any(r_ret, b.rev@, data, b.rev@.len(), a,
-                                r_ret.len(), 0, self.action.to_ret());
-                        }
+        if let Some(arg) = sel {
+            let mask: u32 = if self.syscall.ipc_arg().is_some() { 0xFFFF } else { u32::MAX };
+            b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
+            let ghost r_sel = b.rev@;
+            b.emit_load(Policy::OFFSET_EVENT_ARGS, mask, 0);
+            proof {
+                assert forall |data: &[u8], r: Regs|
+                    #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
+                    #![trigger Builder::lands(b.rev@, data, b.rev@.len(), r, base.len())]
+                    Event::parse(data) is Some && r.wf() implies
+                    if self.body_holds(arch, sel, Event::of(data)) {
+                        Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())
+                    } else {
+                        Builder::lands(b.rev@, data, b.rev@.len(), r, base.len())
+                    } by {
+                    let arg0 = Event::of(data).args[0];
+                    let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
+                    Event::lemma_image(data);
+                    assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
+                        == (arg0 & 0xFFFF_FFFF) as u32);
+                    assert((arg0 & 0xFFFF) as u32 == ((arg0 & 0xFFFF_FFFF) as u32) & 0xFFFF)
+                        by (bit_vector);
+                    assert((w & u32::MAX) ^ 0u32 == w) by (bit_vector);
+                    assert((w & 0xFFFF) ^ 0u32 == w & 0xFFFF) by (bit_vector);
+                    let got = Regs { a: (w & mask) ^ 0, ..r };
+                    assert(self.body_holds(arch, sel, Event::of(data)) <==> got.a == arg);
+                    let to = if got.a == arg { r_ret.len() } else { end as nat };
+                    assert(Builder::goes(r_sel, data, r_sel.len(), got, to, got));
+                    Builder::lemma_goes_trans(r_sel, b.rev@, data, b.rev@.len(), r, r_sel.len(), got, to, got);
+                    if got.a == arg {
+                        Builder::lemma_then(r_ret, b.rev@, data, b.rev@.len(), r, r_ret.len(), got,
+                            0, self.action.to_ret());
                     }
                 }
-                return Ok(());
             }
+            return Ok(());
         }
 
         let ret = b.label();
@@ -391,31 +389,32 @@ impl Rule {
             b.emit_goto(entry)?;
         }
         proof {
-            assert forall |data: &[u8], a: u32| Event::parse(data) is Some implies
-                #[trigger] Builder::goes_to(b.rev@, data, b.rev@.len(), a, entry as nat, a) by {
+            assert forall |data: &[u8], r: Regs|
+                #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, entry as nat, r) by {
                 if entry == r_cond.len() {
-                    assert(Builder::goes_to(b.rev@, data, entry as nat, a, entry as nat, a));
+                    assert(Builder::goes(b.rev@, data, entry as nat, r, entry as nat, r));
                 }
             }
-            assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && self.body_holds(arch, nr, Event::of(data))
-                implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), a,
-                    self.action.to_ret()) by {
+            assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && self.body_holds(arch, sel, Event::of(data))
+                implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret()) by {
                 assert(self.cond.holds(arch, sig@, data));
-                assert(Builder::lands(r_cond, data, entry as nat, a, ret as nat));
-                let m = choose |m: u32| Builder::goes_to(r_cond, data, entry as nat, a, ret as nat, m);
-                assert(Builder::returns(r_ret, data, ret as nat, m, self.action.to_ret()));
-                Builder::lemma_then(r_ret, r_cond, data, entry as nat, a, ret as nat, m, 0,
+                assert(Builder::lands(r_cond, data, entry as nat, r, ret as nat));
+                let m = choose |m: Regs| m.wf()
+                    && #[trigger] Builder::goes(r_cond, data, entry as nat, r, ret as nat, m);
+                Builder::lemma_then(r_ret, r_cond, data, entry as nat, r, ret as nat, m, 0,
                     self.action.to_ret());
-                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), a, entry as nat, a, 0,
+                assert(Builder::goes(b.rev@, data, b.rev@.len(), r, entry as nat, r));
+                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), r, entry as nat, r, 0,
                     self.action.to_ret());
             }
-            assert forall |data: &[u8], a: u32| Event::parse(data) is Some
-                && !self.body_holds(arch, nr, Event::of(data))
-                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), a, end as nat) by {
+            assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && !self.body_holds(arch, sel, Event::of(data))
+                implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), r, end as nat) by {
                 assert(!self.cond.holds(arch, sig@, data));
-                assert(Builder::lands(r_cond, data, entry as nat, a, end as nat));
-                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), a, entry as nat, a,
+                assert(Builder::lands(r_cond, data, entry as nat, r, end as nat));
+                assert(Builder::goes(b.rev@, data, b.rev@.len(), r, entry as nat, r));
+                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), r, entry as nat, r,
                     end as nat, 0);
             }
         }
@@ -507,53 +506,53 @@ impl Rule {
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && self.eval(arch, Event::of(data)) ==>
-                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(),
-                    Event::of(data).nr as u32, self.action.to_ret()),
-            res is Ok ==> forall |data: &[u8]| Event::parse(data) is Some
-                && !self.eval(arch, Event::of(data)) ==>
-                #[trigger] Builder::goes_to(final(b).rev@, data, final(b).rev@.len(),
-                    Event::of(data).nr as u32, old(b).rev@.len(), Event::of(data).nr as u32),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 && self.eval(arch, Event::of(data)) ==>
+                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
+            res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
+                && r.a == Event::of(data).nr as u32 && !self.eval(arch, Event::of(data)) ==>
+                #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r,
+                    old(b).rev@.len(), Event::of(data).nr as u32),
     {
         let ghost prev = b.rev@;
         if let Some(nr) = self.mux_nr(arch) {
-            self.emit(b, arch, nr)?;
+            self.emit(b, arch, nr, self.mux_arg(arch))?;
         }
         let ghost mux = b.rev@;
         if let Some(nr) = self.syscall.bpf_nr(arch) {
-            self.emit(b, arch, nr)?;
+            self.emit(b, arch, nr, None)?;
         }
         proof {
-            assert forall |data: &[u8]|
-                #![trigger Builder::returns(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32, self.action.to_ret())]
-                #![trigger Builder::goes_to(b.rev@, data, b.rev@.len(), Event::of(data).nr as u32,
-                    prev.len(), Event::of(data).nr as u32)]
-                Event::parse(data) is Some implies
+            assert forall |data: &[u8], r: Regs|
+                #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
+                #![trigger Builder::passes(b.rev@, data, b.rev@.len(), r, prev.len(), Event::of(data).nr as u32)]
+                Event::parse(data) is Some && r.wf() && r.a == Event::of(data).nr as u32 implies
                 if self.eval(arch, Event::of(data)) {
-                    Builder::returns(b.rev@, data, b.rev@.len(),
-                        Event::of(data).nr as u32, self.action.to_ret())
+                    Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())
                 } else {
-                    Builder::goes_to(b.rev@, data, b.rev@.len(),
-                        Event::of(data).nr as u32, prev.len(), Event::of(data).nr as u32)
+                    Builder::passes(b.rev@, data, b.rev@.len(), r, prev.len(), Event::of(data).nr as u32)
                 } by {
                 let ev = Event::of(data);
                 let nr = ev.nr as u32;
                 Event::lemma_image(data);
                 self.lemma_matches(arch, ev);
                 let own = match self.syscall.spec_bpf_nr(arch) {
-                    Some(n) => self.matches_at(arch, n, ev),
+                    Some(n) => self.matches_at(arch, n, None, ev),
                     None => false,
                 };
                 if !own {
-                    assert(Builder::goes_to(b.rev@, data, b.rev@.len(), nr, mux.len(), nr));
+                    assert(Builder::goes(b.rev@, data, b.rev@.len(), r, b.rev@.len(), r));
+                    assert(Builder::passes(b.rev@, data, b.rev@.len(), r, mux.len(), nr));
+                    let t = choose |t: Regs| t.wf() && t.a == nr
+                        && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), r, mux.len(), t);
+                    assert(Builder::goes(mux, data, mux.len(), t, mux.len(), t));
                     if self.eval(arch, ev) {
-                        assert(Builder::returns(mux, data, mux.len(), nr, self.action.to_ret()));
-                        Builder::lemma_then(mux, b.rev@, data, b.rev@.len(), nr, mux.len(), nr,
+                        assert(Builder::returns(mux, data, mux.len(), t, self.action.to_ret()));
+                        Builder::lemma_then(mux, b.rev@, data, b.rev@.len(), r, mux.len(), t,
                             0, self.action.to_ret());
                     } else {
-                        assert(Builder::goes_to(mux, data, mux.len(), nr, prev.len(), nr));
-                        Builder::lemma_then(mux, b.rev@, data, b.rev@.len(), nr, mux.len(), nr,
+                        assert(Builder::passes(mux, data, mux.len(), t, prev.len(), nr));
+                        Builder::lemma_then(mux, b.rev@, data, b.rev@.len(), r, mux.len(), t,
                             prev.len(), nr);
                     }
                 }

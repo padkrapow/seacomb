@@ -49,24 +49,21 @@ impl Builder {
     /// reached through a `Ja` trampoline.
     pub(super) fn emit_jump(&mut self, op: JmpOp, src: Src, expect: bool, target: Label) -> (res: Result<(), CompileError>)
         requires
-            src is K,
             0 < target <= self.rev@.len(),
             self.wf(),
         ensures
             Builder::extends(old(self).rev@, final(self).rev@),
             final(self).wf(),
-            res is Ok ==> forall |data: &[u8], a: u32| op.eval(a, src->K_0) == expect ==>
-                #[trigger] Builder::goes_to(final(self).rev@, data, final(self).rev@.len(),
-                    a, target as nat, a),
-            res is Ok ==> forall |data: &[u8], a: u32| op.eval(a, src->K_0) != expect ==>
-                #[trigger] Builder::goes_to(final(self).rev@, data, final(self).rev@.len(),
-                    a, old(self).rev@.len(), a),
-            res is Ok ==> forall |data: &[u8], a: u32, to: nat|
-                (op.eval(a, src->K_0) == expect ==> to == target)
-                && (op.eval(a, src->K_0) != expect ==>
-                    Builder::lands(old(self).rev@, data, old(self).rev@.len(), a, to))
-                ==> #[trigger] Builder::lands(final(self).rev@, data, final(self).rev@.len(),
-                    a, to),
+            res is Ok ==> forall |data: &[u8], r: Regs| r.test(op, src) == expect ==>
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r, target as nat, r),
+            res is Ok ==> forall |data: &[u8], r: Regs| r.test(op, src) != expect ==>
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r,
+                    old(self).rev@.len(), r),
+            res is Ok ==> forall |data: &[u8], r: Regs, to: nat|
+                (r.test(op, src) == expect ==> to == target)
+                && (r.test(op, src) != expect ==>
+                    Builder::lands(old(self).rev@, data, old(self).rev@.len(), r, to))
+                && r.wf() ==> #[trigger] Builder::lands(final(self).rev@, data, final(self).rev@.len(), r, to),
     {
         let ghost prev = self.rev@;
         let off = self.label() - target;
@@ -78,7 +75,7 @@ impl Builder {
             let jt = if expect { off } else { 0 };
             let jf = if expect { 0 } else { off };
             self.emit(Instr::Jmp { op, src, jt, jf });
-            proof { Builder::lemma_jmp(self.rev@, op, src->K_0, jt, jf); }
+            proof { Builder::lemma_jmp(self.rev@, op, src, jt, jf); }
         } else {
             //      jmp op, src     ; take the branch that leads into the trampoline
             //      ja  target
@@ -89,72 +86,25 @@ impl Builder {
             let jf = if expect { 1 } else { 0 };
             self.emit(Instr::Jmp { op, src, jt, jf });
             proof {
-                Builder::lemma_jmp(self.rev@, op, src->K_0, jt, jf);
-                assert forall |data: &[u8], a: u32| op.eval(a, src->K_0) == expect implies
-                    #[trigger] Builder::goes_to(self.rev@, data, self.rev@.len(), a, target as nat, a) by {
-                    Builder::lemma_then(trampoline, self.rev@, data, self.rev@.len(), a,
-                        trampoline.len(), a, target as nat, a);
-                }
-            }
-        }
-        proof {
-            assert forall |data: &[u8], a: u32, to: nat|
-                (op.eval(a, src->K_0) == expect ==> to == target)
-                && (op.eval(a, src->K_0) != expect ==> Builder::lands(prev, data, prev.len(), a, to))
-                implies #[trigger] Builder::lands(self.rev@, data, self.rev@.len(), a, to) by {
-                if op.eval(a, src->K_0) == expect {
-                    assert(Builder::goes_to(self.rev@, data, self.rev@.len(), a, to, a));
-                } else {
-                    let m = choose |m: u32| Builder::goes_to(prev, data, prev.len(), a, to, m);
-                    Builder::lemma_then(prev, self.rev@, data, self.rev@.len(), a,
-                        prev.len(), a, to, m);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Puts a jump in front of the program that moves control to `target` when `A op X`
-    /// equals `expect`, and falls through otherwise.
-    pub(super) fn emit_jump_x(&mut self, op: JmpOp, expect: bool, target: Label) -> (res: Result<(), CompileError>)
-        requires
-            0 < target <= self.rev@.len(),
-            self.wf(),
-        ensures
-            Builder::extends(old(self).rev@, final(self).rev@),
-            final(self).wf(),
-            res is Ok ==> forall |data: &[u8], r: Regs| op.eval(r.a, r.x) == expect ==>
-                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r, target as nat, r),
-            res is Ok ==> forall |data: &[u8], r: Regs| op.eval(r.a, r.x) != expect ==>
-                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r,
-                    old(self).rev@.len(), r),
-    {
-        let off = self.label() - target;
-        if off > u32::MAX as usize {
-            return Err(CompileError::JmpIdxOverflow);
-        }
-        if off <= u8::MAX as usize {
-            let off = off as u8;
-            let jt = if expect { off } else { 0 };
-            let jf = if expect { 0 } else { off };
-            self.emit(Instr::Jmp { op, src: Src::X, jt, jf });
-            proof { Builder::lemma_jmp_x(self.rev@, op, jt, jf); }
-        } else {
-            //      jmp op, x       ; take the branch that leads into the trampoline
-            //      ja  target
-            self.emit(Instr::Ja(off as u32));
-            proof { Builder::lemma_ja(self.rev@, off as u32); }
-            let ghost trampoline = self.rev@;
-            let jt = if expect { 0 } else { 1 };
-            let jf = if expect { 1 } else { 0 };
-            self.emit(Instr::Jmp { op, src: Src::X, jt, jf });
-            proof {
-                Builder::lemma_jmp_x(self.rev@, op, jt, jf);
-                assert forall |data: &[u8], r: Regs| op.eval(r.a, r.x) == expect implies
+                Builder::lemma_jmp(self.rev@, op, src, jt, jf);
+                assert forall |data: &[u8], r: Regs| r.test(op, src) == expect implies
                     #[trigger] Builder::goes(self.rev@, data, self.rev@.len(), r, target as nat, r) by {
                     assert(Builder::goes(trampoline, data, trampoline.len(), r, target as nat, r));
                     Builder::lemma_goes_trans(trampoline, self.rev@, data, self.rev@.len(), r,
                         trampoline.len(), r, target as nat, r);
+                }
+            }
+        }
+        proof {
+            assert forall |data: &[u8], r: Regs, to: nat|
+                (r.test(op, src) == expect ==> to == target)
+                && (r.test(op, src) != expect ==> Builder::lands(prev, data, prev.len(), r, to))
+                && r.wf() implies #[trigger] Builder::lands(self.rev@, data, self.rev@.len(), r, to) by {
+                if r.test(op, src) == expect {
+                    assert(Builder::goes(self.rev@, data, self.rev@.len(), r, to, r));
+                } else {
+                    assert(Builder::goes(self.rev@, data, self.rev@.len(), r, prev.len(), r));
+                    Builder::lemma_then(prev, self.rev@, data, self.rev@.len(), r, prev.len(), r, to, 0);
                 }
             }
         }
@@ -173,9 +123,8 @@ impl Builder {
         ensures
             Builder::extends(old(self).rev@, final(self).rev@),
             final(self).wf(),
-            res is Ok ==> forall |data: &[u8], a: u32|
-                #[trigger] Builder::goes_to(final(self).rev@, data, final(self).rev@.len(),
-                    a, target as nat, a),
+            res is Ok ==> forall |data: &[u8], r: Regs|
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r, target as nat, r),
     {
         let off = self.label() - target;
         if off > u32::MAX as usize {
@@ -199,11 +148,13 @@ impl Builder {
         ensures
             Builder::extends(old(self).rev@, final(self).rev@),
             final(self).wf(),
-            forall |data: &[u8], a: u32, to: nat| k + 4 <= data@.len()
+            forall |data: &[u8], r: Regs| k + 4 <= data@.len() ==>
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r,
+                    old(self).rev@.len(), Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }),
+            forall |data: &[u8], r: Regs, to: nat| k + 4 <= data@.len()
                 && Builder::lands(old(self).rev@, data, old(self).rev@.len(),
-                    (Builder::word(data, k) & mask) ^ bias, to)
-                ==> #[trigger] Builder::lands(final(self).rev@, data, final(self).rev@.len(),
-                    a, to),
+                    Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }, to)
+                ==> #[trigger] Builder::lands(final(self).rev@, data, final(self).rev@.len(), r, to),
     {
         let ghost r_xor = self.rev@;
         if bias != 0 {
@@ -219,19 +170,26 @@ impl Builder {
         self.emit(Instr::LdAbs(k));
         proof {
             Builder::lemma_ld(self.rev@, k);
-            assert forall |data: &[u8], a: u32, to: nat| k + 4 <= data@.len()
-                && Builder::lands(r_xor, data, r_xor.len(), (Builder::word(data, k) & mask) ^ bias, to)
-                implies #[trigger] Builder::lands(self.rev@, data, self.rev@.len(), a, to) by {
+            assert forall |data: &[u8], r: Regs| k + 4 <= data@.len() implies
+                #[trigger] Builder::goes(self.rev@, data, self.rev@.len(), r, r_xor.len(),
+                    Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }) by {
                 let w = Builder::word(data, k);
                 let m = w & mask;
                 assert((w & u32::MAX) == w) by (bit_vector);
                 assert((m ^ 0u32) == m) by (bit_vector);
-                assert(Builder::goes_to(r_and, data, r_and.len(), m, r_xor.len(), m ^ bias));
-                Builder::lemma_then(r_xor, r_and, data, r_and.len(), m, r_xor.len(), m ^ bias, to, 0);
-                assert(Builder::goes_to(r_ld, data, r_ld.len(), w, r_and.len(), m));
-                Builder::lemma_then(r_and, r_ld, data, r_ld.len(), w, r_and.len(), m, to, 0);
-                assert(Builder::goes_to(self.rev@, data, self.rev@.len(), a, r_ld.len(), w));
-                Builder::lemma_then(r_ld, self.rev@, data, self.rev@.len(), a, r_ld.len(), w, to, 0);
+                let (rw, rm, rb) = (Regs { a: w, ..r }, Regs { a: m, ..r }, Regs { a: m ^ bias, ..r });
+                assert(Builder::goes(r_and, data, r_and.len(), rm, r_xor.len(), rb));
+                assert(Builder::goes(r_ld, data, r_ld.len(), rw, r_and.len(), rm));
+                Builder::lemma_goes_trans(r_and, r_ld, data, r_ld.len(), rw, r_and.len(), rm, r_xor.len(), rb);
+                assert(Builder::goes(self.rev@, data, self.rev@.len(), r, r_ld.len(), rw));
+                Builder::lemma_goes_trans(r_ld, self.rev@, data, self.rev@.len(), r, r_ld.len(), rw, r_xor.len(), rb);
+            }
+            assert forall |data: &[u8], r: Regs, to: nat| k + 4 <= data@.len()
+                && Builder::lands(r_xor, data, r_xor.len(), Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r }, to)
+                implies #[trigger] Builder::lands(self.rev@, data, self.rev@.len(), r, to) by {
+                let rb = Regs { a: (Builder::word(data, k) & mask) ^ bias, ..r };
+                assert(Builder::goes(self.rev@, data, self.rev@.len(), r, r_xor.len(), rb));
+                Builder::lemma_then(r_xor, self.rev@, data, self.rev@.len(), r, r_xor.len(), rb, to, 0);
             }
         }
     }

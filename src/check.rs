@@ -51,7 +51,7 @@ impl Action {
 
 impl PrimType {
     /// Executable version of [`PrimType::subtype_of`].
-    fn exec_subtype_of(self, arch: Arch, other: PrimType) -> (res: bool)
+    pub(crate) fn exec_subtype_of(self, arch: Arch, other: PrimType) -> (res: bool)
         ensures res == self.subtype_of(arch, other)
     {
         if self == PrimType::Ptr || other == PrimType::Ptr {

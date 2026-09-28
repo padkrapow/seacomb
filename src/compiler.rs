@@ -29,9 +29,6 @@ pub enum CompileError {
     /// A syscall signature uses more argument slots than `seccomp_data` provides.
     #[error("syscall signature exceeds the available argument slots")]
     SignatureLayout,
-    /// A rule condition has no type.
-    #[error("rule condition has no type")]
-    Untyped,
     /// A rule condition needs more than the 16 words of scratch memory.
     #[error("rule condition needs more scratch memory than cBPF has")]
     ScratchOverflow,
@@ -109,7 +106,8 @@ impl Policy {
                 assert(prog.instrs@.len() == gb.rev@.len());
                 assert(Builder::returns_all(gb.rev@, data, gb.rev@.len(), act.to_ret()));
                 assert(Builder::extends(gb.rev@, gb.rev@));
-                assert(Builder::returns(gb.rev@, data, gb.rev@.len(), 0, act.to_ret()));
+                assert(Builder::returns(gb.rev@, data, gb.rev@.len(), Regs::of(MachineState::init()),
+                    act.to_ret()));
                 assert(Builder::run(gb.rev@, data, gb.rev@.len(), Regs::of(MachineState::init()))
                     == Outcome::Return(act.to_ret()));
                 self.lemma_blocks(Event::of(data), 0);

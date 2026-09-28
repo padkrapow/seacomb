@@ -1,6 +1,7 @@
 //! Compiling expressions to the 64-bit patterns of their values, one scratch pair each.
 
 use vstd::prelude::*;
+use vstd::pervasive::unreached;
 use crate::spec::{policy::*, expr::*, cbpf::*};
 use super::CompileError;
 use super::builder::Builder;
@@ -99,20 +100,6 @@ impl PrimType {
         ensures Expr::pat(self.trunc(arch, v)) == self.norm(arch, Expr::pat(v))
     {
         self.lemma_to_bits(arch, v);
-    }
-
-    /// A type at most 32 bits wide reads nothing but the low word.
-    pub(super) proof fn lemma_norm_low(self, arch: Arch, q1: u64, q2: u64)
-        requires self.bits(arch) <= 32, q1 as u32 == q2 as u32
-        ensures self.norm(arch, q1) == self.norm(arch, q2)
-    {
-        let mask = self.mask(arch);
-        let b = self.bits(arch);
-        self.lemma_mask(arch);
-        assert(mask <= 0xFFFF_FFFF) by (bit_vector)
-            requires mask == ((1u64 << b) - 1) as u64, b <= 32;
-        assert(q1 & mask == q2 & mask) by (bit_vector)
-            requires mask <= 0xFFFF_FFFF, q1 as u32 == q2 as u32;
     }
 
     /// Types of one width and signedness read bits alike.
@@ -414,6 +401,83 @@ impl PrimType {
 }
 
 impl Expr {
+    /// Whether this expression has a type.
+    pub(super) open spec fn typed(&self, arch: Arch, ctx: Seq<PrimType>) -> bool {
+        exists |t: PrimType| self.of_type(arch, ctx, t)
+    }
+
+    /// Whether every type of this expression has the width, signedness, and pointerness
+    /// of `ty`.
+    pub(super) open spec fn shaped(&self, arch: Arch, ctx: Seq<PrimType>, ty: PrimType) -> bool {
+        forall |t: PrimType| #[trigger] self.of_type(arch, ctx, t) ==> {
+            &&& t.bits(arch) == ty.bits(arch)
+            &&& t.signed() == ty.signed()
+            &&& (t == PrimType::Ptr) == (ty == PrimType::Ptr)
+        }
+    }
+
+    /// Whether this expression has one of the types [`PrimType::wf`] allows.
+    spec fn listed(&self, arch: Arch, ctx: Seq<PrimType>) -> bool {
+        ||| self.of_type(arch, ctx, PrimType::I(8)) ||| self.of_type(arch, ctx, PrimType::I(16))
+        ||| self.of_type(arch, ctx, PrimType::I(32)) ||| self.of_type(arch, ctx, PrimType::I(64))
+        ||| self.of_type(arch, ctx, PrimType::U(8)) ||| self.of_type(arch, ctx, PrimType::U(16))
+        ||| self.of_type(arch, ctx, PrimType::U(32)) ||| self.of_type(arch, ctx, PrimType::U(64))
+        ||| self.of_type(arch, ctx, PrimType::IWord) ||| self.of_type(arch, ctx, PrimType::UWord)
+        ||| self.of_type(arch, ctx, PrimType::Ptr)
+    }
+
+    /// The operands of a typed expression are typed.
+    pub(super) proof fn lemma_operands_typed(&self, arch: Arch, ctx: Seq<PrimType>)
+        requires self.typed(arch, ctx)
+        ensures
+            self matches Expr::Cast(e, _) ==> e.typed(arch, ctx),
+            self matches Expr::BinOp(_, l, r) ==> l.typed(arch, ctx) && r.typed(arch, ctx),
+    {
+        // The operands' types sit under an `exists` over the fueled recursive call, which
+        // no term of `of_type` at the default fuel matches. A second unfolding reveals that
+        // they are well-formed, and listing the well-formed types supplies the terms.
+        reveal_with_fuel(Expr::of_type, 2);
+        match self {
+            Expr::Cast(e, _) => assert(e.listed(arch, ctx)),
+            Expr::BinOp(_, l, r) => assert(l.listed(arch, ctx) && r.listed(arch, ctx)),
+            _ => {}
+        }
+    }
+
+    /// Returns a type of the width, signedness, and pointerness every type of this
+    /// expression has.
+    pub(super) fn ty(&self, arch: Arch, sig: &[PrimType]) -> (res: PrimType)
+        requires self.typed(arch, sig@)
+        ensures res.wf(), self.shaped(arch, sig@, res)
+        decreases self
+    {
+        proof { self.lemma_operands_typed(arch, sig@); }
+        match self {
+            Expr::Var(i) => sig[*i as usize],
+            Expr::Lit(_, t) | Expr::Cast(_, t) => *t,
+            Expr::BinOp(op, l, r) => {
+                let t1 = l.ty(arch, sig);
+                let t2 = r.ty(arch, sig);
+                let res = if matches!(op, BinOp::Add | BinOp::Sub) && t1.exec_subtype_of(arch, t2) { t2 } else { t1 };
+                proof {
+                    assert forall |t: PrimType| #[trigger] self.of_type(arch, sig@, t) implies {
+                        &&& t.bits(arch) == res.bits(arch)
+                        &&& t.signed() == res.signed()
+                        &&& (t == PrimType::Ptr) == (res == PrimType::Ptr)
+                    } by {
+                        if *op is Add || *op is Sub {
+                            self.lemma_operands(arch, sig@, t);
+                        } else {
+                            assert(l.of_type(arch, sig@, t));
+                            assert(r.of_type(arch, sig@, t));
+                        }
+                    }
+                }
+                res
+            }
+        }
+    }
+
     /// The number of nodes in this expression.
     pub(super) open spec fn size(self) -> nat
         decreases self
@@ -429,7 +493,7 @@ impl Expr {
     /// `slot`, and leaves the pairs below it alone.
     pub(super) fn emit_value(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32)
         -> (res: Result<(), CompileError>)
-        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8
+        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8, self.typed(arch, sig@)
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
@@ -456,7 +520,7 @@ impl Expr {
     ///     <normalize>
     /// ```
     fn emit_var(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32) -> (res: Result<(), CompileError>)
-        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8
+        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8, self is Var, self.typed(arch, sig@)
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
@@ -466,15 +530,9 @@ impl Expr {
     {
         let i = match self {
             Expr::Var(i) => *i as usize,
-            _ => return Err(CompileError::Untyped),
+            _ => unreached(),
         };
-        if i >= sig.len() {
-            return Err(CompileError::Untyped);
-        }
         let ty = sig[i];
-        if !ty.exec_wf() {
-            return Err(CompileError::Untyped);
-        }
         let at = arch.arg_slot(sig, i)?;
         let lo = Policy::OFFSET_EVENT_ARGS + 8 * at;
         let hi = if arch.exec_splits(ty) { lo + 8 } else { lo + 4 };
@@ -561,7 +619,7 @@ impl Expr {
     /// ```
     #[allow(unused_variables)]
     fn emit_lit(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32) -> (res: Result<(), CompileError>)
-        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8
+        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8, self is Lit
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
@@ -571,7 +629,7 @@ impl Expr {
     {
         let (c, ty) = match self {
             Expr::Lit(c, ty) => (*c, *ty),
-            _ => return Err(CompileError::Untyped),
+            _ => unreached(),
         };
         // The 64-bit two's complement word of `c`.
         let q = if c >= 0 { c as u64 } else { u64::MAX - (-(c + 1)) as u64 };
@@ -609,7 +667,7 @@ impl Expr {
     /// ```
     fn emit_cast(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32)
         -> (res: Result<(), CompileError>)
-        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8
+        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8, self is Cast, self.typed(arch, sig@)
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
@@ -620,11 +678,9 @@ impl Expr {
     {
         let (e, ty) = match self {
             Expr::Cast(e, ty) => (e, *ty),
-            _ => return Err(CompileError::Untyped),
+            _ => unreached(),
         };
-        if !ty.exec_wf() {
-            return Err(CompileError::Untyped);
-        }
+        proof { self.lemma_operands_typed(arch, sig@); }
         let ghost base = b.rev@;
         ty.emit_norm(b, arch, slot);
         let ghost r_norm = b.rev@;
@@ -655,7 +711,7 @@ impl Expr {
     /// ```
     fn emit_binary(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], slot: u32)
         -> (res: Result<(), CompileError>)
-        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8
+        requires old(b).wf(), 0 < old(b).rev@.len(), slot < 8, self is BinOp, self.typed(arch, sig@)
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
@@ -669,12 +725,10 @@ impl Expr {
         }
         let (op, l, r) = match self {
             Expr::BinOp(op, l, r) => (*op, l, r),
-            _ => return Err(CompileError::Untyped),
+            _ => unreached(),
         };
-        let ty = match self.check(arch, sig) {
-            Ok((t, _)) => t,
-            Err(_) => return Err(CompileError::Untyped),
-        };
+        let ty = self.ty(arch, sig);
+        proof { self.lemma_operands_typed(arch, sig@); }
         // The operand that needs more scratch pairs goes first, into `slot`.
         let (ls, rs) = if l.pairs() >= r.pairs() { (slot, slot + 1) } else { (slot + 1, slot) };
         let ghost base = b.rev@;
@@ -731,6 +785,7 @@ impl Expr {
         ls: u32, rs: u32) -> (res: Result<(), CompileError>)
         requires
             old(b).wf(), 0 < old(b).rev@.len(), slot + 1 < 8,
+            self.typed(arch, sig@), other.typed(arch, sig@),
             ls == slot && rs == slot + 1 || ls == slot + 1 && rs == slot,
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
@@ -861,7 +916,7 @@ impl Expr {
 
     /// A binary operation's pattern, from its operands' patterns.
     pub(super) proof fn lemma_binary_pattern(&self, arch: Arch, ctx: Seq<PrimType>, data: &[u8], ty: PrimType)
-        requires self is BinOp, self.of_type(arch, ctx, ty)
+        requires self is BinOp, self.typed(arch, ctx), self.shaped(arch, ctx, ty)
         ensures
             self.pattern(arch, ctx, data) == ty.norm(arch, self->BinOp_0.apply(
                 self->BinOp_1.pattern(arch, ctx, data), self->BinOp_2.pattern(arch, ctx, data))),
@@ -869,7 +924,6 @@ impl Expr {
         match self {
             Expr::BinOp(op, e1, e2) => {
                 let t = choose |t: PrimType| self.of_type(arch, ctx, t);
-                self.lemma_type_unique(arch, ctx, t, ty);
                 t.lemma_same(ty, arch);
                 let v1 = e1.value(arch, ctx, data);
                 let v2 = e2.value(arch, ctx, data);

@@ -1,7 +1,9 @@
 //! What the filter computes, told as a policy-level account of its blocks and rule tests.
 
 use vstd::prelude::*;
-use crate::spec::{policy::*, syscall::*};
+use crate::spec::policy::*;
+#[allow(unused_imports)]
+use crate::spec::syscall::*;
 
 verus! {
 
@@ -13,52 +15,34 @@ impl Arch {
     }
 }
 
-impl Syscall {
-    /// No syscall a multiplexer reaches answers to the multiplexer's own x86 number.
-    pub(super) broadcast proof fn lemma_mux_nr(&self)
-        ensures
-            #[trigger] self.to_socketcall_arg() is Some
-                ==> self.spec_nr(Arch::X86) != Self::Socketcall.spec_nr(Arch::X86),
-            #[trigger] self.to_ipc_arg() is Some
-                ==> self.spec_nr(Arch::X86) != Self::Ipc.spec_nr(Arch::X86),
-    {
-        reveal(Syscall::spec_nr);
-    }
-}
-
 impl Rule {
-    /// The cBPF low word contains the kernel's 16-bit ipc selector.
-    pub(super) proof fn lemma_ipc_selector(x: u64)
-        ensures (x & 0xFFFF) as u32 == ((x & 0xFFFF_FFFF) as u32) & 0xFFFF
-    {
-        assert((x & 0xFFFF) as u32 == ((x & 0xFFFF_FFFF) as u32) & 0xFFFF)
-            by (bit_vector);
-    }
-
-    /// Whether the rule's body accepts `ev`, the test for syscall number `nr` having passed.
-    pub(super) open spec fn body_holds(self, arch: Arch, nr: u32, ev: Event) -> bool {
-        if self.spec_mux_nr(arch) == Some(nr) {
-            self.spec_mux_arg(arch) == Some((ev.args[0]
-                & if self.syscall.to_ipc_arg() is Some { 0xFFFF } else { 0xFFFF_FFFF }) as u32)
-        } else {
-            let sig = self.syscall.spec_signature(arch);
-            self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
+    /// Whether the rule's body accepts `ev`: multiplexer selector `sel` if there is
+    /// one, and the rule's condition otherwise.
+    pub(super) open spec fn body_holds(self, arch: Arch, sel: Option<u32>, ev: Event) -> bool {
+        match sel {
+            Some(arg) => arg == (ev.args[0]
+                & if self.syscall.to_ipc_arg() is Some { 0xFFFF } else { 0xFFFF_FFFF }) as u32,
+            None => {
+                let sig = self.syscall.spec_signature(arch);
+                self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
+            }
         }
     }
 
-    /// Whether the test for syscall number `nr` reaches this rule and its body accepts `ev`.
-    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, ev: Event) -> bool {
-        ev.nr as u32 == nr && self.body_holds(arch, nr, ev)
+    /// Whether the test for syscall number `nr` reaches this rule and its body, with
+    /// selector `sel`, accepts `ev`.
+    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, sel: Option<u32>, ev: Event) -> bool {
+        ev.nr as u32 == nr && self.body_holds(arch, sel, ev)
     }
 
     /// Whether either of the tests a block emits for this rule reaches it and accepts `ev`.
     pub(super) open spec fn matches(self, arch: Arch, ev: Event) -> bool {
         ||| match self.syscall.spec_bpf_nr(arch) {
-                Some(nr) => self.matches_at(arch, nr, ev),
+                Some(nr) => self.matches_at(arch, nr, None, ev),
                 None => false,
             }
         ||| match self.spec_mux_nr(arch) {
-                Some(nr) => self.matches_at(arch, nr, ev),
+                Some(nr) => self.matches_at(arch, nr, self.spec_mux_arg(arch), ev),
                 None => false,
             }
     }
@@ -68,12 +52,11 @@ impl Rule {
         requires ev.args.len() == Rule::ARG_COUNT_MAX
         ensures self.matches(arch, ev) <==> self.eval(arch, ev)
     {
-        broadcast use Syscall::lemma_mux_nr;
-        ev.lemma_nr();
+        let m = ev.nr;
+        assert(forall |nr: i32| #[trigger] (nr as u32) == (m as u32) ==> nr == m) by (bit_vector);
         // Socketcall reads the low word; ipc reads the low 16 bits.
         assert(forall |x: u64| #[trigger] (x & 0xFFFF_FFFF) < 0x1_0000_0000) by (bit_vector);
         assert(forall |x: u64| #[trigger] (x & 0xFFFF) < 0x1_0000_0000) by (bit_vector);
-        Self::lemma_ipc_selector(ev.args[0]);
     }
 }
 

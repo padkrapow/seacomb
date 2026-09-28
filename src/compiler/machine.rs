@@ -33,6 +33,11 @@ impl Regs {
     pub(super) open spec fn wf(self) -> bool {
         self.mem.len() == Program::MEM_WORDS
     }
+
+    /// Whether `A op src` holds in these registers.
+    pub(super) open spec fn test(self, op: JmpOp, src: Src) -> bool {
+        op.eval(self.a, src.eval(self.at(0)))
+    }
 }
 
 impl Instr {
@@ -155,39 +160,27 @@ impl Builder {
     }
 
     /// Whether every extension of `rev`, entered at `from` with registers `r`, carries
-    /// on at `to` with `A` holding `b`.
+    /// on at `to` with some well-formed registers.
+    pub(super) open spec fn lands(rev: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat) -> bool {
+        exists |t: Regs| t.wf() && #[trigger] Self::goes(rev, data, from, r, to, t)
+    }
+
+    /// Whether every extension of `rev`, entered at `from` with registers `r`, carries
+    /// on at `to` with some well-formed registers whose `A` holds `b`.
     pub(super) open spec fn passes(rev: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat, b: u32) -> bool {
-        ||| from == to && r.a == b
-        ||| exists |t: Regs| t.a == b && t.wf() && #[trigger] Self::goes(rev, data, from, r, to, t)
+        exists |t: Regs| t.wf() && t.a == b && #[trigger] Self::goes(rev, data, from, r, to, t)
     }
 
-    /// Whether every extension of `rev`, entered at `from` with `A` holding `a`,
-    /// carries on at `to` with `A` holding `b`, whatever the other registers hold.
-    pub(super) open spec fn goes_to(rev: Seq<Instr>, data: &[u8], from: nat, a: u32, to: nat, b: u32) -> bool {
-        forall |r: Regs| r.a == a && r.wf() ==> #[trigger] Self::passes(rev, data, from, r, to, b)
-    }
-
-    /// Whether every extension of `rev`, entered at `from` whatever `A` holds, carries
-    /// on at `to` with `A` holding `b`.
-    pub(super) open spec fn goes_to_all(rev: Seq<Instr>, data: &[u8], from: nat, to: nat, b: u32) -> bool {
-        forall |a: u32| #[trigger] Self::goes_to(rev, data, from, a, to, b)
-    }
-
-    /// Whether every extension of `rev`, entered at `from` with `A` holding `a`, carries
-    /// on at `to`, with nothing left to say about `A`.
-    pub(super) open spec fn lands(rev: Seq<Instr>, data: &[u8], from: nat, a: u32, to: nat) -> bool {
-        exists |b: u32| Self::goes_to(rev, data, from, a, to, b)
-    }
-
-    /// Whether every extension of `rev`, entered at `from` with `A` holding `a`, returns `ret`.
-    pub(super) open spec fn returns(rev: Seq<Instr>, data: &[u8], from: nat, a: u32, ret: u32) -> bool {
-        forall |ext: Seq<Instr>, r: Regs| Self::extends(rev, ext) && r.a == a && r.wf()
+    /// Whether every extension of `rev`, entered at `from` with registers `r`, returns `ret`.
+    pub(super) open spec fn returns(rev: Seq<Instr>, data: &[u8], from: nat, r: Regs, ret: u32) -> bool {
+        forall |ext: Seq<Instr>| Self::extends(rev, ext)
             ==> #[trigger] Self::run(ext, data, from, r) == Outcome::Return(ret)
     }
 
-    /// Whether every extension of `rev`, entered at `from` whatever `A` holds, returns `ret`.
+    /// Whether every extension of `rev`, entered at `from` with any well-formed registers,
+    /// returns `ret`.
     pub(super) open spec fn returns_all(rev: Seq<Instr>, data: &[u8], from: nat, ret: u32) -> bool {
-        forall |a: u32| #[trigger] Self::returns(rev, data, from, a, ret)
+        forall |r: Regs| r.wf() ==> #[trigger] Self::returns(rev, data, from, r, ret)
     }
 
     /// Whether the instruction `i` slots back from the end of the program belongs there.
@@ -232,55 +225,7 @@ impl Builder {
         assert(prog.instrs@.reverse() =~= self.rev@);
     }
 
-    /// Facts about the instructions emitted so far hold of anything emitted in front of them.
-    pub(super) proof fn lemma_mono(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, a: u32, to: nat, b: u32)
-        requires Self::extends(rev, ext)
-        ensures
-            Self::goes_to(rev, data, from, a, to, b) ==> Self::goes_to(ext, data, from, a, to, b),
-            Self::lands(rev, data, from, a, to) ==> Self::lands(ext, data, from, a, to),
-            Self::returns(rev, data, from, a, b) ==> Self::returns(ext, data, from, a, b),
-    {
-        assert forall |far: Seq<Instr>| Self::extends(ext, far) implies Self::extends(rev, far) by {
-        }
-        assert forall |c: u32| Self::goes_to(rev, data, from, a, to, c)
-            implies #[trigger] Self::goes_to(ext, data, from, a, to, c) by {
-            assert forall |r: Regs| r.a == a && r.wf()
-                implies #[trigger] Self::passes(ext, data, from, r, to, c) by {
-                Self::lemma_passes_mono(rev, ext, data, from, r, to, c);
-            }
-        }
-        if Self::lands(rev, data, from, a, to) {
-            let c = choose |c: u32| Self::goes_to(rev, data, from, a, to, c);
-            assert(Self::goes_to(ext, data, from, a, to, c));
-        }
-    }
-
-    /// Full-register facts about the instructions emitted so far hold of anything emitted
-    /// in front of them.
-    pub(super) proof fn lemma_goes_mono(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat, t: Regs)
-        requires Self::extends(rev, ext), Self::goes(rev, data, from, r, to, t)
-        ensures Self::goes(ext, data, from, r, to, t)
-    {
-        assert forall |far: Seq<Instr>| Self::extends(ext, far)
-            implies #[trigger] Self::run(far, data, from, r) == Self::run(far, data, to, t) by {
-            assert(Self::extends(rev, far));
-        }
-    }
-
-    /// A [`Builder::passes`] fact about the instructions emitted so far holds of anything
-    /// emitted in front of them.
-    pub(super) proof fn lemma_passes_mono(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, to: nat, b: u32)
-        requires Self::extends(rev, ext), Self::passes(rev, data, from, r, to, b)
-        ensures Self::passes(ext, data, from, r, to, b)
-    {
-        if !(from == to && r.a == b) {
-            let t = choose |t: Regs| t.a == b && t.wf() && #[trigger] Self::goes(rev, data, from, r, to, t);
-            Self::lemma_goes_mono(rev, ext, data, from, r, to, t);
-        }
-    }
-
-    /// Entering `from` runs the stretch of code that reaches `mid` and then the one behind
-    /// it, with every register accounted for.
+    /// Entering `from` runs the stretch of code that reaches `mid` and then the one behind it.
     pub(super) proof fn lemma_goes_trans(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, mid: nat, m: Regs, to: nat, t: Regs)
         requires
             Self::extends(rev, ext),
@@ -296,84 +241,30 @@ impl Builder {
         }
     }
 
-    /// Entering `from` with registers `r` reaches `mid` with `A` holding `m`, and then
-    /// wherever `mid` goes from there.
-    pub(super) proof fn lemma_passes_then(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, mid: nat, m: u32, to: nat, b: u32)
+    /// Entering `from` reaches `mid` with registers `m`, and then wherever `mid` goes from there.
+    pub(super) proof fn lemma_then(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, r: Regs, mid: nat, m: Regs, to: nat, b: u32)
         requires
             Self::extends(rev, ext),
-            r.wf(),
-            Self::passes(ext, data, from, r, mid, m),
-            Self::goes_to(rev, data, mid, m, to, b),
-        ensures Self::passes(ext, data, from, r, to, b)
-    {
-        if from == mid && r.a == m {
-            assert(Self::passes(rev, data, mid, r, to, b));
-            Self::lemma_passes_mono(rev, ext, data, mid, r, to, b);
-        } else {
-            let s = choose |s: Regs| s.a == m && s.wf() && #[trigger] Self::goes(ext, data, from, r, mid, s);
-            assert(Self::passes(rev, data, mid, s, to, b));
-            if !(mid == to && s.a == b) {
-                let t = choose |t: Regs| t.a == b && t.wf() && #[trigger] Self::goes(rev, data, mid, s, to, t);
-                Self::lemma_goes_trans(rev, ext, data, from, r, mid, s, to, t);
-            }
-        }
-    }
-
-    /// Entering `from` runs the stretch of code that reaches `mid` and then the one behind it.
-    pub(super) proof fn lemma_then(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, a: u32, mid: nat, m: u32, to: nat, b: u32)
-        requires
-            Self::extends(rev, ext),
-            Self::goes_to(ext, data, from, a, mid, m),
+            Self::goes(ext, data, from, r, mid, m),
         ensures
-            Self::goes_to(rev, data, mid, m, to, b) ==> Self::goes_to(ext, data, from, a, to, b),
-            Self::lands(rev, data, mid, m, to) ==> Self::lands(ext, data, from, a, to),
-            Self::returns(rev, data, mid, m, b) ==> Self::returns(ext, data, from, a, b),
+            Self::lands(rev, data, mid, m, to) ==> Self::lands(ext, data, from, r, to),
+            Self::passes(rev, data, mid, m, to, b) ==> Self::passes(ext, data, from, r, to, b),
+            Self::returns(rev, data, mid, m, b) ==> Self::returns(ext, data, from, r, b),
     {
-        assert forall |c: u32| Self::goes_to(rev, data, mid, m, to, c)
-            implies #[trigger] Self::goes_to(ext, data, from, a, to, c) by {
-            assert forall |r: Regs| r.a == a && r.wf()
-                implies #[trigger] Self::passes(ext, data, from, r, to, c) by {
-                assert(Self::passes(ext, data, from, r, mid, m));
-                Self::lemma_passes_then(rev, ext, data, from, r, mid, m, to, c);
-            }
-        }
         if Self::lands(rev, data, mid, m, to) {
-            let c = choose |c: u32| Self::goes_to(rev, data, mid, m, to, c);
-            assert(Self::goes_to(ext, data, from, a, to, c));
+            let t = choose |t: Regs| t.wf() && #[trigger] Self::goes(rev, data, mid, m, to, t);
+            Self::lemma_goes_trans(rev, ext, data, from, r, mid, m, to, t);
+        }
+        if Self::passes(rev, data, mid, m, to, b) {
+            let t = choose |t: Regs| t.wf() && t.a == b && #[trigger] Self::goes(rev, data, mid, m, to, t);
+            Self::lemma_goes_trans(rev, ext, data, from, r, mid, m, to, t);
         }
         if Self::returns(rev, data, mid, m, b) {
-            assert forall |far: Seq<Instr>, r: Regs| Self::extends(ext, far) && r.a == a && r.wf()
+            assert forall |far: Seq<Instr>| Self::extends(ext, far)
                 implies #[trigger] Self::run(far, data, from, r) == Outcome::Return(b) by {
+                assert(Self::run(far, data, from, r) == Self::run(far, data, mid, m));
                 assert(Self::extends(rev, far));
-                assert(Self::passes(ext, data, from, r, mid, m));
-                if !(from == mid && r.a == m) {
-                    let s = choose |s: Regs| s.a == m && s.wf() && #[trigger] Self::goes(ext, data, from, r, mid, s);
-                    assert(Self::run(far, data, from, r) == Self::run(far, data, mid, s));
-                    assert(Self::run(far, data, mid, s) == Outcome::Return(b));
-                } else {
-                    assert(Self::run(far, data, mid, r) == Outcome::Return(b));
-                }
             }
-        }
-    }
-
-    /// Entering `from` reaches `mid`, where what `A` holds no longer matters.
-    pub(super) proof fn lemma_then_any(rev: Seq<Instr>, ext: Seq<Instr>, data: &[u8], from: nat, a: u32, mid: nat, to: nat, b: u32)
-        requires
-            Self::extends(rev, ext),
-            Self::lands(ext, data, from, a, mid),
-        ensures
-            Self::goes_to_all(rev, data, mid, to, b) ==> Self::goes_to(ext, data, from, a, to, b),
-            Self::returns_all(rev, data, mid, b) ==> Self::returns(ext, data, from, a, b),
-    {
-        let m = choose |m: u32| Self::goes_to(ext, data, from, a, mid, m);
-        if Self::goes_to_all(rev, data, mid, to, b) {
-            assert(Self::goes_to(rev, data, mid, m, to, b));
-            Self::lemma_then(rev, ext, data, from, a, mid, m, to, b);
-        }
-        if Self::returns_all(rev, data, mid, b) {
-            assert(Self::returns(rev, data, mid, m, b));
-            Self::lemma_then(rev, ext, data, from, a, mid, m, to, b);
         }
     }
 
@@ -399,28 +290,14 @@ impl Builder {
             0 < rev.len(),
             rev[rev.len() - 1] == Instr::LdAbs(k),
         ensures
-            forall |data: &[u8], to: nat, b: u32|
-                k + 4 <= data@.len() && to == rev.len() - 1 && b == Self::word(data, k) ==>
-                #[trigger] Self::goes_to_all(rev, data, rev.len(), to, b),
-            forall |data: &[u8], a: u32, to: nat, b: u32|
-                k + 4 <= data@.len() && to == rev.len() - 1 && b == Self::word(data, k) ==>
-                #[trigger] Self::goes_to(rev, data, rev.len(), a, to, b),
+            forall |data: &[u8], r: Regs| k + 4 <= data@.len() ==>
+                #[trigger] Self::goes(rev, data, rev.len(), r, (rev.len() - 1) as nat,
+                    Regs { a: Self::word(data, k), ..r }),
     {
-        assert forall |data: &[u8], to: nat, b: u32|
-            k + 4 <= data@.len() && to == rev.len() - 1 && b == Self::word(data, k) implies
-            #[trigger] Self::goes_to_all(rev, data, rev.len(), to, b) by {
-            assert forall |a: u32| #[trigger] Self::goes_to(rev, data, rev.len(), a, to, b) by {
-                assert forall |r: Regs| r.a == a && r.wf()
-                    implies #[trigger] Self::passes(rev, data, rev.len(), r, to, b) by {
-                    Self::lemma_front(rev, data, r);
-                    assert(Self::goes(rev, data, rev.len(), r, to, Regs { a: b, ..r }));
-                }
-            }
-        }
-        assert forall |data: &[u8], a: u32, to: nat, b: u32|
-            k + 4 <= data@.len() && to == rev.len() - 1 && b == Self::word(data, k) implies
-            #[trigger] Self::goes_to(rev, data, rev.len(), a, to, b) by {
-            assert(Self::goes_to_all(rev, data, rev.len(), to, b));
+        assert forall |data: &[u8], r: Regs| k + 4 <= data@.len() implies
+            #[trigger] Self::goes(rev, data, rev.len(), r, (rev.len() - 1) as nat,
+                Regs { a: Self::word(data, k), ..r }) by {
+            Self::lemma_front(rev, data, r);
         }
     }
 
@@ -430,18 +307,13 @@ impl Builder {
             0 < rev.len(),
             rev[rev.len() - 1] == Instr::Alu(op, Src::K(k)),
             !(op is Div && k == 0),
-        ensures forall |data: &[u8], a: u32, to: nat, b: u32|
-            to == rev.len() - 1 && b == op.eval(a, k) ==>
-            #[trigger] Self::goes_to(rev, data, rev.len(), a, to, b)
+        ensures
+            forall |data: &[u8], r: Regs| #[trigger] Self::goes(rev, data, rev.len(), r,
+                (rev.len() - 1) as nat, Regs { a: op.eval(r.a, k), ..r }),
     {
-        assert forall |data: &[u8], a: u32, to: nat, b: u32|
-            to == rev.len() - 1 && b == op.eval(a, k) implies
-            #[trigger] Self::goes_to(rev, data, rev.len(), a, to, b) by {
-            assert forall |r: Regs| r.a == a && r.wf()
-                implies #[trigger] Self::passes(rev, data, rev.len(), r, to, b) by {
-                Self::lemma_front(rev, data, r);
-                assert(Self::goes(rev, data, rev.len(), r, to, Regs { a: b, ..r }));
-            }
+        assert forall |data: &[u8], r: Regs| #[trigger] Self::goes(rev, data, rev.len(), r,
+            (rev.len() - 1) as nat, Regs { a: op.eval(r.a, k), ..r }) by {
+            Self::lemma_front(rev, data, r);
         }
     }
 
@@ -450,12 +322,10 @@ impl Builder {
         requires 0 < rev.len(), rev[rev.len() - 1] == Instr::Ret(RetVal::K(k))
         ensures forall |data: &[u8]| #[trigger] Self::returns_all(rev, data, rev.len(), k)
     {
-        assert forall |data: &[u8]| #[trigger] Self::returns_all(rev, data, rev.len(), k) by {
-            assert forall |a: u32| #[trigger] Self::returns(rev, data, rev.len(), a, k) by {
-                assert forall |ext: Seq<Instr>, r: Regs| Self::extends(rev, ext) && r.a == a && r.wf()
-                    implies #[trigger] Self::run(ext, data, rev.len(), r) == Outcome::Return(k) by {
-                    Self::lemma_front(rev, data, r);
-                }
+        assert forall |data: &[u8], r: Regs| #[trigger] Self::returns(rev, data, rev.len(), r, k) by {
+            assert forall |ext: Seq<Instr>| Self::extends(rev, ext)
+                implies #[trigger] Self::run(ext, data, rev.len(), r) == Outcome::Return(k) by {
+                Self::lemma_front(rev, data, r);
             }
         }
     }
@@ -464,8 +334,6 @@ impl Builder {
     pub(super) proof fn lemma_ja(rev: Seq<Instr>, k: u32)
         requires 0 < rev.len(), rev[rev.len() - 1] == Instr::Ja(k), k < rev.len() - 1
         ensures
-            forall |data: &[u8], a: u32, to: nat|
-                to == rev.len() - 1 - k ==> #[trigger] Self::goes_to(rev, data, rev.len(), a, to, a),
             forall |data: &[u8], r: Regs, to: nat|
                 to == rev.len() - 1 - k ==> #[trigger] Self::goes(rev, data, rev.len(), r, to, r),
     {
@@ -473,56 +341,24 @@ impl Builder {
             to == rev.len() - 1 - k implies #[trigger] Self::goes(rev, data, rev.len(), r, to, r) by {
             Self::lemma_front(rev, data, r);
         }
-        assert forall |data: &[u8], a: u32, to: nat|
-            to == rev.len() - 1 - k implies #[trigger] Self::goes_to(rev, data, rev.len(), a, to, a) by {
-            assert forall |r: Regs| r.a == a && r.wf()
-                implies #[trigger] Self::passes(rev, data, rev.len(), r, to, a) by {
-                assert(Self::goes(rev, data, rev.len(), r, to, r));
-            }
-        }
     }
 
-    /// The conditional jump at the front of `rev` skips `jt` instructions when `A op k`
+    /// The conditional jump at the front of `rev` skips `jt` instructions when `A op src`
     /// holds and `jf` when it does not.
-    pub(super) proof fn lemma_jmp(rev: Seq<Instr>, op: JmpOp, k: u32, jt: u8, jf: u8)
+    pub(super) proof fn lemma_jmp(rev: Seq<Instr>, op: JmpOp, src: Src, jt: u8, jf: u8)
         requires
             0 < rev.len(),
-            rev[rev.len() - 1] == (Instr::Jmp { op, src: Src::K(k), jt, jf }),
+            rev[rev.len() - 1] == (Instr::Jmp { op, src, jt, jf }),
             jt < rev.len() - 1,
             jf < rev.len() - 1,
         ensures
-            forall |data: &[u8], a: u32, to: nat| op.eval(a, k) && to == rev.len() - 1 - jt ==>
-                #[trigger] Self::goes_to(rev, data, rev.len(), a, to, a),
-            forall |data: &[u8], a: u32, to: nat| !op.eval(a, k) && to == rev.len() - 1 - jf ==>
-                #[trigger] Self::goes_to(rev, data, rev.len(), a, to, a),
-    {
-        assert forall |data: &[u8], a: u32, to: nat|
-            (op.eval(a, k) && to == rev.len() - 1 - jt) || (!op.eval(a, k) && to == rev.len() - 1 - jf)
-            implies #[trigger] Self::goes_to(rev, data, rev.len(), a, to, a) by {
-            assert forall |r: Regs| r.a == a && r.wf()
-                implies #[trigger] Self::passes(rev, data, rev.len(), r, to, a) by {
-                Self::lemma_front(rev, data, r);
-                assert(Self::goes(rev, data, rev.len(), r, to, r));
-            }
-        }
-    }
-
-    /// The jump at the front of `rev` that compares `A` with `X` skips `jt` instructions
-    /// when `A op X` holds and `jf` when it does not.
-    pub(super) proof fn lemma_jmp_x(rev: Seq<Instr>, op: JmpOp, jt: u8, jf: u8)
-        requires
-            0 < rev.len(),
-            rev[rev.len() - 1] == (Instr::Jmp { op, src: Src::X, jt, jf }),
-            jt < rev.len() - 1,
-            jf < rev.len() - 1,
-        ensures
-            forall |data: &[u8], r: Regs, to: nat| op.eval(r.a, r.x) && to == rev.len() - 1 - jt ==>
+            forall |data: &[u8], r: Regs, to: nat| r.test(op, src) && to == rev.len() - 1 - jt ==>
                 #[trigger] Self::goes(rev, data, rev.len(), r, to, r),
-            forall |data: &[u8], r: Regs, to: nat| !op.eval(r.a, r.x) && to == rev.len() - 1 - jf ==>
+            forall |data: &[u8], r: Regs, to: nat| !r.test(op, src) && to == rev.len() - 1 - jf ==>
                 #[trigger] Self::goes(rev, data, rev.len(), r, to, r),
     {
         assert forall |data: &[u8], r: Regs, to: nat|
-            (op.eval(r.a, r.x) && to == rev.len() - 1 - jt) || (!op.eval(r.a, r.x) && to == rev.len() - 1 - jf)
+            (r.test(op, src) && to == rev.len() - 1 - jt) || (!r.test(op, src) && to == rev.len() - 1 - jf)
             implies #[trigger] Self::goes(rev, data, rev.len(), r, to, r) by {
             Self::lemma_front(rev, data, r);
         }
