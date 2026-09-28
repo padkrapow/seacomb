@@ -278,12 +278,9 @@ impl Policy {
                 decreases self.rules@.len() - i
             {
                 assert(self.rules@[i as int].wf(self.archs@));
-                assert forall |j: int| 0 <= j < self.rules@[i as int].conds@.len()
-                    implies #[trigger] self.rules@[i as int].conds@[j].wf(arch,
-                        self.rules@[i as int].syscall) by {
+                proof {
                     let k = choose |k: int| 0 <= k < self.archs@.len() && self.archs@[k] == arch;
-                    assert(self.rules@[i as int].conds@[j].wf(self.archs@[k],
-                        self.rules@[i as int].syscall));
+                    assert(self.archs@[k] == arch);
                 }
                 let ghost prev = b.rev@;
                 let ghost rule = self.rules@[i as int];

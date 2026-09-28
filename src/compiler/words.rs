@@ -87,28 +87,4 @@ impl Event {
     }
 }
 
-impl ArgCmp {
-    /// A 64-bit value seen as two 32-bit words: comparisons settle on the high word
-    /// unless the two are equal, and a mask applies to each word on its own.
-    pub(super) proof fn lemma_words(x: u64, y: u64)
-        ensures
-            x & u64::MAX == x,
-            x & 0xFFFF_FFFF == (x as u32) as u64,
-            (x == y) <==> (((x >> 32) as u32) == ((y >> 32) as u32) && (x as u32) == (y as u32)),
-            (x < y) <==> (((x >> 32) as u32) < ((y >> 32) as u32)
-                || (((x >> 32) as u32) == ((y >> 32) as u32) && (x as u32) < (y as u32))),
-            ((x & y) as u32) == ((x as u32) & (y as u32)),
-            (((x & y) >> 32) as u32) == (((x >> 32) as u32) & ((y >> 32) as u32)),
-    {
-        assert(x & u64::MAX == x) by (bit_vector);
-        assert(x & 0xFFFF_FFFF == (x as u32) as u64) by (bit_vector);
-        assert(((x & y) as u32) == ((x as u32) & (y as u32))) by (bit_vector);
-        assert((((x & y) >> 32) as u32) == (((x >> 32) as u32) & ((y >> 32) as u32))) by (bit_vector);
-        assert((x == y) <==> (((x >> 32) as u32) == ((y >> 32) as u32) && (x as u32) == (y as u32)))
-            by (bit_vector);
-        assert((x < y) <==> (((x >> 32) as u32) < ((y >> 32) as u32)
-            || (((x >> 32) as u32) == ((y >> 32) as u32) && (x as u32) < (y as u32)))) by (bit_vector);
-    }
-}
-
 } // verus!

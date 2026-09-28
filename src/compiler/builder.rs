@@ -3,6 +3,8 @@
 use vstd::prelude::*;
 use crate::spec::cbpf::*;
 use super::CompileError;
+#[allow(unused_imports)]
+use super::machine::Regs;
 
 verus! {
 
@@ -112,6 +114,78 @@ impl Builder {
         Ok(())
     }
 
+    /// Puts a jump in front of the program that moves control to `target` when `A op X`
+    /// equals `expect`, and falls through otherwise.
+    pub(super) fn emit_jump_x(&mut self, op: JmpOp, expect: bool, target: Label) -> (res: Result<(), CompileError>)
+        requires
+            0 < target <= self.rev@.len(),
+            self.wf(),
+        ensures
+            Builder::extends(old(self).rev@, final(self).rev@),
+            final(self).wf(),
+            res is Ok ==> forall |data: &[u8], r: Regs| op.eval(r.a, r.x) == expect ==>
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r, target as nat, r),
+            res is Ok ==> forall |data: &[u8], r: Regs| op.eval(r.a, r.x) != expect ==>
+                #[trigger] Builder::goes(final(self).rev@, data, final(self).rev@.len(), r,
+                    old(self).rev@.len(), r),
+    {
+        let off = self.label() - target;
+        if off > u32::MAX as usize {
+            return Err(CompileError::JmpIdxOverflow);
+        }
+        if off <= u8::MAX as usize {
+            let off = off as u8;
+            let jt = if expect { off } else { 0 };
+            let jf = if expect { 0 } else { off };
+            self.emit(Instr::Jmp { op, src: Src::X, jt, jf });
+            proof { Builder::lemma_jmp_x(self.rev@, op, jt, jf); }
+        } else {
+            //      jmp op, x       ; take the branch that leads into the trampoline
+            //      ja  target
+            self.emit(Instr::Ja(off as u32));
+            proof { Builder::lemma_ja(self.rev@, off as u32); }
+            let ghost trampoline = self.rev@;
+            let jt = if expect { 0 } else { 1 };
+            let jf = if expect { 1 } else { 0 };
+            self.emit(Instr::Jmp { op, src: Src::X, jt, jf });
+            proof {
+                Builder::lemma_jmp_x(self.rev@, op, jt, jf);
+                assert forall |data: &[u8], r: Regs| op.eval(r.a, r.x) == expect implies
+                    #[trigger] Builder::goes(self.rev@, data, self.rev@.len(), r, target as nat, r) by {
+                    assert(Builder::goes(trampoline, data, trampoline.len(), r, target as nat, r));
+                    Builder::lemma_goes_trans(trampoline, self.rev@, data, self.rev@.len(), r,
+                        trampoline.len(), r, target as nat, r);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts an unconditional jump to `target` in front of the program.
+    ///
+    /// ```text
+    ///     ja  target
+    /// ```
+    pub(super) fn emit_goto(&mut self, target: Label) -> (res: Result<(), CompileError>)
+        requires
+            0 < target <= self.rev@.len(),
+            self.wf(),
+        ensures
+            Builder::extends(old(self).rev@, final(self).rev@),
+            final(self).wf(),
+            res is Ok ==> forall |data: &[u8], a: u32|
+                #[trigger] Builder::goes_to(final(self).rev@, data, final(self).rev@.len(),
+                    a, target as nat, a),
+    {
+        let off = self.label() - target;
+        if off > u32::MAX as usize {
+            return Err(CompileError::JmpIdxOverflow);
+        }
+        self.emit(Instr::Ja(off as u32));
+        proof { Builder::lemma_ja(self.rev@, off as u32); }
+        Ok(())
+    }
+
     /// Puts a load of the word at `k`, masked with `mask` and flipped by `bias`, in front
     /// of the program.
     ///
@@ -158,6 +232,46 @@ impl Builder {
                 Builder::lemma_then(r_and, r_ld, data, r_ld.len(), w, r_and.len(), m, to, 0);
                 assert(Builder::goes_to(self.rev@, data, self.rev@.len(), a, r_ld.len(), w));
                 Builder::lemma_then(r_ld, self.rev@, data, self.rev@.len(), a, r_ld.len(), w, to, 0);
+            }
+        }
+    }
+
+    /// Puts `block` in front of the program, running into what follows it.
+    pub(super) fn emit_block(&mut self, block: &[Instr])
+        requires
+            old(self).wf(),
+            0 < old(self).rev@.len(),
+            Instr::fits_from(block@, 0),
+        ensures
+            Builder::extends(old(self).rev@, final(self).rev@),
+            final(self).wf(),
+            forall |data: &[u8], r: Regs| #[trigger] Instr::exec_block(block@, 0, data, r) matches Some(t)
+                ==> Builder::goes(final(self).rev@, data, final(self).rev@.len(), r, old(self).rev@.len(), t),
+    {
+        let ghost base = self.rev@;
+        proof { Instr::lemma_fits(block@, 0); }
+        let mut i = block.len();
+        while i > 0
+            invariant
+                i <= block@.len(),
+                0 < base.len(),
+                self.wf(),
+                self.rev@.len() == base.len() + block@.len() - i,
+                Builder::extends(base, self.rev@),
+                forall |j: int| #![trigger block@[j]] i <= j < block@.len()
+                    ==> self.rev@[base.len() + block@.len() - 1 - j] == block@[j],
+                forall |j: int| #![trigger block@[j]] 0 <= j < block@.len() ==> block@[j].fits(j as nat, block@.len()),
+            decreases i
+        {
+            i -= 1;
+            proof { assert(block@[i as int].fits(i as nat, block@.len())); }
+            self.emit(block[i]);
+        }
+        proof {
+            assert forall |data: &[u8], r: Regs| #[trigger] Instr::exec_block(block@, 0, data, r) is Some
+                implies Builder::goes(self.rev@, data, self.rev@.len(), r, base.len(),
+                    Instr::exec_block(block@, 0, data, r)->Some_0) by {
+                Builder::lemma_block(self.rev@, base.len(), block@, data, 0, r);
             }
         }
     }

@@ -6,12 +6,16 @@ use crate::spec::{policy::*, cbpf::*};
 mod block;
 mod builder;
 mod eval;
+mod expr;
 mod machine;
 mod rule;
 mod syscall;
+mod value;
 mod words;
 
 use builder::Builder;
+#[allow(unused_imports)]
+use machine::Regs;
 
 verus! {
 
@@ -25,9 +29,12 @@ pub enum CompileError {
     /// A syscall signature uses more argument slots than `seccomp_data` provides.
     #[error("syscall signature exceeds the available argument slots")]
     SignatureLayout,
-    /// A syscall argument width cannot be represented by this compiler.
-    #[error("unsupported syscall argument width {0}")]
-    UnsupportedArgWidth(u32),
+    /// A rule condition has no type.
+    #[error("rule condition has no type")]
+    Untyped,
+    /// A rule condition needs more than the 16 words of scratch memory.
+    #[error("rule condition needs more scratch memory than cBPF has")]
+    ScratchOverflow,
 }
 
 impl Policy {
@@ -103,7 +110,8 @@ impl Policy {
                 assert(Builder::returns_all(gb.rev@, data, gb.rev@.len(), act.to_ret()));
                 assert(Builder::extends(gb.rev@, gb.rev@));
                 assert(Builder::returns(gb.rev@, data, gb.rev@.len(), 0, act.to_ret()));
-                assert(Builder::run(gb.rev@, data, gb.rev@.len(), 0) == Outcome::Return(act.to_ret()));
+                assert(Builder::run(gb.rev@, data, gb.rev@.len(), Regs::of(MachineState::init()))
+                    == Outcome::Return(act.to_ret()));
                 self.lemma_blocks(Event::of(data), 0);
                 assert(prog.eval(data) == Outcome::Return(act.to_ret()));
             }

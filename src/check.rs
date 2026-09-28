@@ -1,7 +1,7 @@
 //! Policy validation (i.e., executable versions of the `wf` specs).
 
 use vstd::prelude::*;
-use crate::spec::{policy::*, syscall::*};
+use crate::spec::{policy::*, expr::*};
 
 verus! {
 
@@ -9,25 +9,23 @@ verus! {
 #[verifier::external_derive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+#[allow(inconsistent_fields)]
 pub enum CheckError {
     /// Invalid errno number.
     #[error("invalid errno number {0}")]
     InvalidErrno(u16),
-    /// Invalid argument index for a syscall signature.
-    #[error("argument index {given} is out of range for {syscall:?} ({total} arguments)")]
-    InvalidArg { given: u32, total: u32, syscall: Syscall },
-    /// A comparison operator is incompatible with an argument type.
-    #[error("operator {op:?} is unsupported for {ty:?} argument {arg} of {syscall:?}")]
-    UnsupportedCompare { arg: u32, syscall: Syscall, ty: PrimType, op: Compare },
-    /// A comparison value does not fit an argument type.
-    #[error("value {value:#x} does not fit {ty:?} argument {arg} of {syscall:?}")]
-    InvalidCompareValue { arg: u32, syscall: Syscall, ty: PrimType, value: u64 },
-    /// A comparison mask does not fit an argument type.
-    #[error("mask {mask:#x} does not fit {ty:?} argument {arg} of {syscall:?}")]
-    InvalidCompareMask { arg: u32, syscall: Syscall, ty: PrimType, mask: u64 },
-    /// A masked comparison value has bits outside its mask.
-    #[error("value {value:#x} exceeds mask {mask:#x} for {ty:?} argument {arg} of {syscall:?}")]
-    InvalidMaskedValue { arg: u32, syscall: Syscall, ty: PrimType, mask: u64, value: u64 },
+    /// An argument index past the end of a syscall signature.
+    #[error("argument {given} is out of range ({total} arguments)")]
+    InvalidArg { given: u32, total: u32 },
+    /// A type of an unsupported width.
+    #[error("{0:?} is not a supported width")]
+    InvalidWidth(PrimType),
+    /// A comparison has operands that are ordered pointers or that neither convert to the other.
+    #[error("{op} cannot be applied to {lhs} and {rhs}")]
+    CmpTypes { op: CmpOp, lhs: PrimType, rhs: PrimType },
+    /// A binary operation has a pointer operand, or operands it cannot combine.
+    #[error("{op} cannot be applied to {lhs} and {rhs}")]
+    BinOpTypes { op: BinOp, lhs: PrimType, rhs: PrimType },
     /// A rule has conditions on a syscall whose signatures differ across architectures.
     #[error("syscall signatures differ across enabled architectures")]
     IncompatSigs,
@@ -51,61 +49,159 @@ impl Action {
     }
 }
 
-impl ArgCmp {
-    /// Checks a condition against one syscall signature.
-    fn check(&self, arch: Arch, syscall: Syscall, sig: &[PrimType]) -> (res: Result<(), CheckError>)
-        requires sig@ =~= syscall.spec_signature(arch)
-        ensures res is Ok <==> self.wf(arch, syscall)
+impl PrimType {
+    /// Executable version of [`PrimType::subtype_of`].
+    fn exec_subtype_of(self, arch: Arch, other: PrimType) -> (res: bool)
+        ensures res == self.subtype_of(arch, other)
     {
-        if self.arg as usize >= sig.len() {
-            return Err(CheckError::InvalidArg {
-                given: self.arg, total: sig.len() as u32, syscall,
-            });
+        if self == PrimType::Ptr || other == PrimType::Ptr {
+            self == PrimType::Ptr && other == PrimType::Ptr
+        } else {
+            let bits = self.exec_bits(arch);
+            let other_bits = other.exec_bits(arch);
+            self.exec_signed() == other.exec_signed() && bits <= other_bits
+                || !self.exec_signed() && other.exec_signed() && bits < other_bits
         }
-        let ty = sig[self.arg as usize];
-        let mask = ty.exec_mask(arch);
-        let order = self.op == Compare::Lt || self.op == Compare::Le
-            || self.op == Compare::Gt || self.op == Compare::Ge;
-        if ty == PrimType::Ptr && order {
-            return Err(CheckError::UnsupportedCompare { arg: self.arg, syscall, ty, op: self.op });
+    }
+
+    /// Checks that this type has a supported width.
+    fn check(self) -> (res: Result<(), CheckError>)
+        ensures res is Ok <==> self.wf()
+    {
+        if self.exec_wf() { Ok(()) } else { Err(CheckError::InvalidWidth(self)) }
+    }
+}
+
+impl Expr {
+    /// Returns a type of this expression over a signature `sig` on `arch`, and whether it
+    /// also has every type that converts to and from that one.
+    pub(crate) fn check(&self, arch: Arch, sig: &[PrimType]) -> (res: Result<(PrimType, bool), CheckError>)
+        ensures
+            res matches Ok((ty, _)) ==> self.of_type(arch, sig@, ty),
+            res matches Ok((ty, true)) ==> forall |t: PrimType|
+                t.subtype_of(arch, ty) && ty.subtype_of(arch, t) ==> #[trigger] self.of_type(arch, sig@, t),
+        decreases self
+    {
+        match self {
+            Expr::Var(i) => {
+                if *i as usize >= sig.len() {
+                    return Err(CheckError::InvalidArg { given: *i, total: sig.len() as u32 });
+                }
+                sig[*i as usize].check()?;
+                Ok((sig[*i as usize], false))
+            }
+            Expr::Lit(_, ty) => {
+                ty.check()?;
+                Ok((*ty, false))
+            }
+            Expr::Cast(e, ty) => {
+                #[allow(unused_variables)]
+                let (from, _) = e.check(arch, sig)?;
+                ty.check()?;
+                proof {
+                    // Denying the sum a pointer type brings up the operand at the fuel
+                    // `of_type` looks for it at.
+                    assert(!Expr::BinOp(BinOp::Add, *e, *e).of_type(arch, sig@, PrimType::Ptr));
+                    assert(from.subtype_of(arch, from));
+                }
+                Ok((*ty, false))
+            }
+            Expr::BinOp(op, l, r) => {
+                let (t1, all1) = l.check(arch, sig)?;
+                let (t2, all2) = r.check(arch, sig)?;
+                let up = t1.exec_subtype_of(arch, t2);
+                let down = t2.exec_subtype_of(arch, t1);
+                let err = CheckError::BinOpTypes { op: *op, lhs: t1, rhs: t2 };
+                if t1 == PrimType::Ptr || t2 == PrimType::Ptr || !up && !down {
+                    return Err(err);
+                }
+                match op {
+                    BinOp::Add | BinOp::Sub => {
+                        // The result takes the larger type, or either one if each converts to the other.
+                        let (ty, all) = if !down {
+                            (t2, all2)
+                        } else if !up {
+                            (t1, all1)
+                        } else {
+                            (t1, all1 || all2 || t1 != t2)
+                        };
+                        proof {
+                            assert forall |t: PrimType| all && t.subtype_of(arch, ty) && ty.subtype_of(arch, t)
+                                implies #[trigger] self.of_type(arch, sig@, t) by {
+                                if all1 && ty == t1 {
+                                    assert(l.of_type(arch, sig@, t));
+                                    assert(t2.subtype_of(arch, t));
+                                } else if all2 {
+                                    assert(r.of_type(arch, sig@, t));
+                                    assert(t1.subtype_of(arch, t));
+                                } else {
+                                    // Two distinct types that each convert to the other are the
+                                    // only types that do so with either.
+                                    assert(t == t1 || t == t2);
+                                }
+                            }
+                        }
+                        Ok((ty, all))
+                    }
+                    _ => {
+                        // No implicit casting, but an operand may also have types besides the one returned.
+                        if !up || !down || t1 != t2 && !all1 && !all2 {
+                            return Err(err);
+                        }
+                        let ty = if all1 { t2 } else { t1 };
+                        proof {
+                            assert forall |t: PrimType| t == ty || all1 && all2 && t.subtype_of(arch, ty)
+                                && ty.subtype_of(arch, t) implies #[trigger] self.of_type(arch, sig@, t) by {
+                                assert(l.of_type(arch, sig@, t));
+                                assert(r.of_type(arch, sig@, t));
+                                assert(t.subtype_of(arch, t));
+                            }
+                        }
+                        Ok((ty, all1 && all2))
+                    }
+                }
+            }
         }
-        if self.op == Compare::MaskedEq {
-            if self.a & !mask != 0 {
-                return Err(CheckError::InvalidCompareMask { arg: self.arg, syscall, ty, mask: self.a });
+    }
+}
+
+impl Cond {
+    /// Checks that this condition is well-typed over a signature `sig` on `arch`.
+    pub(crate) fn check(&self, arch: Arch, sig: &[PrimType]) -> (res: Result<(), CheckError>)
+        ensures res is Ok ==> self.wf(arch, sig@)
+        decreases self
+    {
+        match self {
+            Cond::True | Cond::False => Ok(()),
+            Cond::Cmp(op, l, r) => {
+                let (t1, _) = l.check(arch, sig)?;
+                let (t2, _) = r.check(arch, sig)?;
+                // Pointers only compare for equality.
+                if (t1 == PrimType::Ptr || t2 == PrimType::Ptr) && *op != CmpOp::Eq
+                    || !t1.exec_subtype_of(arch, t2) && !t2.exec_subtype_of(arch, t1) {
+                    return Err(CheckError::CmpTypes { op: *op, lhs: t1, rhs: t2 });
+                }
+                Ok(())
             }
-            if self.b & !self.a != 0 {
-                return Err(CheckError::InvalidMaskedValue {
-                    arg: self.arg, syscall, ty, mask: self.a, value: self.b,
-                });
+            Cond::And(l, r) | Cond::Or(l, r) => {
+                l.check(arch, sig)?;
+                r.check(arch, sig)
             }
-        } else if ty.exec_signed() {
-            let sign = !(mask >> 1);
-            if self.a & sign != 0 && self.a & sign != sign {
-                return Err(CheckError::InvalidCompareValue {
-                    arg: self.arg, syscall, ty, value: self.a,
-                });
-            }
-        } else if self.a & !mask != 0 {
-            return Err(CheckError::InvalidCompareValue {
-                arg: self.arg, syscall, ty, value: self.a,
-            });
+            Cond::Not(c) => c.check(arch, sig),
         }
-        Ok(())
     }
 }
 
 impl Rule {
     /// Checks the rule against every enabled architecture.
     pub(crate) fn check(&self, archs: &[Arch]) -> (res: Result<(), CheckError>)
-        ensures res is Ok <==> self.wf(archs@)
+        ensures res is Ok ==> self.wf(archs@)
     {
         self.action.check()?;
-        if !self.no_mux && !self.conds.is_empty()
-            && (self.syscall.socketcall_arg().is_some() || self.syscall.ipc_arg().is_some()) {
+        let cond = &*self.cond;
+        let constrained = !matches!(cond, Cond::True);
+        if constrained && !self.no_mux && (self.syscall.socketcall_arg().is_some() || self.syscall.ipc_arg().is_some()) {
             return Err(CheckError::InvalidMuxConditions);
-        }
-        if self.conds.is_empty() {
-            return Ok(());
         }
         if archs.is_empty() {
             return Ok(());
@@ -114,97 +210,52 @@ impl Rule {
         let mut i: usize = 0;
         while i < archs.len()
             invariant
-                self.action.wf(),
-                !self.no_mux && self.syscall.can_mux() ==> self.conds@.len() == 0,
                 0 < archs@.len(),
+                cond == *self.cond,
+                constrained == (*self.cond != Cond::True),
                 first@ =~= self.syscall.spec_signature(archs@[0]),
-                self.conds@.len() > 0,
                 i <= archs@.len(),
-                forall |k: int| 0 <= k < i ==>
+                constrained ==> forall |k: int| 0 <= k < i ==>
                     self.syscall.spec_signature(#[trigger] archs@[k]) =~= first@,
-                forall |k: int, l: int| 0 <= k < i && 0 <= l < self.conds@.len()
-                    ==> #[trigger] self.conds@[l].wf(archs@[k], self.syscall),
+                forall |k: int| 0 <= k < i ==>
+                    cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k])),
             decreases archs@.len() - i
         {
             let arch = archs[i];
             let sig = self.syscall.signature(arch);
-            if sig.len() != first.len() {
-                proof {
-                    assert(sig@ != first@);
-                    assert(i > 0);
-                    assert(self.syscall.spec_signature(archs@[0])
-                        != self.syscall.spec_signature(archs@[i as int]));
-                    assert(!self.wf(archs@));
-                }
-                return Err(CheckError::IncompatSigs);
-            }
-            let mut t: usize = 0;
-            while t < sig.len()
-                invariant
-                    t <= sig@.len(),
-                    sig@.len() == first@.len(),
-                    self.conds@.len() > 0,
-                    0 < archs@.len(),
-                    i < archs@.len(),
-                    arch == archs@[i as int],
-                    first@ =~= self.syscall.spec_signature(archs@[0]),
-                    sig@ =~= self.syscall.spec_signature(arch),
-                    forall |k: int| 0 <= k < t ==> sig@[k] == first@[k],
-                decreases sig@.len() - t
-            {
-                if sig[t] != first[t] {
-                    proof {
-                        assert(sig@ != first@);
-                        assert(i > 0);
-                        assert(self.syscall.spec_signature(archs@[0])
-                            != self.syscall.spec_signature(archs@[i as int]));
-                        assert(!self.wf(archs@));
-                    }
+            if constrained {
+                if sig.len() != first.len() {
                     return Err(CheckError::IncompatSigs);
                 }
-                t += 1;
-            }
-            proof {
-                assert(sig@ =~= first@);
-            }
-            let mut j: usize = 0;
-            while j < self.conds.len()
-                invariant
-                    j <= self.conds@.len(),
-                    i < archs@.len(),
-                    arch == archs@[i as int],
-                    sig@ =~= self.syscall.spec_signature(arch),
-                    forall |l: int| 0 <= l < j ==>
-                        #[trigger] self.conds@[l].wf(arch, self.syscall),
-                decreases self.conds@.len() - j
-            {
-                if let Err(err) = self.conds[j].check(arch, self.syscall, sig) {
-                    proof {
-                        assert(!self.conds@[j as int].wf(arch, self.syscall));
-                        assert(!self.wf(archs@));
+                let mut t: usize = 0;
+                while t < sig.len()
+                    invariant
+                        t <= sig@.len(),
+                        sig@.len() == first@.len(),
+                        forall |k: int| 0 <= k < t ==> sig@[k] == first@[k],
+                    decreases sig@.len() - t
+                {
+                    if sig[t] != first[t] {
+                        return Err(CheckError::IncompatSigs);
                     }
-                    return Err(err);
+                    t += 1;
                 }
-                j += 1;
-            }
-            proof {
-                assert(self.syscall.spec_signature(arch) =~= first@);
-                assert forall |k: int, l: int| 0 <= k < i + 1 && 0 <= l < self.conds@.len()
-                    implies #[trigger] self.conds@[l].wf(archs@[k], self.syscall) by {
-                    if k == i {
-                        assert(archs@[k] == arch);
-                    }
+                proof {
+                    assert(sig@ =~= first@);
                 }
             }
+            cond.check(arch, sig)?;
             i += 1;
         }
         proof {
             assert forall |k: int, l: int| #![trigger archs@[k], archs@[l]] 0 <= k < l < archs@.len()
                 && self.syscall.spec_signature(archs@[k])
                     != self.syscall.spec_signature(archs@[l])
-                implies self.conds@.len() == 0 by {
-                assert(self.syscall.spec_signature(archs@[k]) =~= first@);
-                assert(self.syscall.spec_signature(archs@[l]) =~= first@);
+                implies *self.cond == Cond::True by {
+                if constrained {
+                    assert(self.syscall.spec_signature(archs@[k]) =~= first@);
+                    assert(self.syscall.spec_signature(archs@[l]) =~= first@);
+                }
             }
         }
         Ok(())
@@ -212,3 +263,37 @@ impl Rule {
 }
 
 } // verus!
+
+impl std::fmt::Display for PrimType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrimType::I(n) => write!(f, "i{n}"),
+            PrimType::U(n) => write!(f, "u{n}"),
+            PrimType::IWord => write!(f, "iword"),
+            PrimType::UWord => write!(f, "uword"),
+            PrimType::Ptr => write!(f, "ptr"),
+        }
+    }
+}
+
+impl std::fmt::Display for CmpOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CmpOp::Eq => "Equality",
+            CmpOp::Lt => "Less-than",
+            CmpOp::Le => "Less-or-equal",
+        })
+    }
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BinOp::Add => "Addition",
+            BinOp::Sub => "Subtraction",
+            BinOp::And => "Bitwise and",
+            BinOp::Or => "Bitwise or",
+            BinOp::Xor => "Bitwise xor",
+        })
+    }
+}

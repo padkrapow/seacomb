@@ -104,6 +104,14 @@ impl PrimType {
             ||| !self.signed() && other.signed() && self.bits(arch) < other.bits(arch)
         }
     }
+
+    /// Only supporting 8/16/32/64-bit integers
+    pub open spec fn wf(self) -> bool {
+        match self {
+            PrimType::I(n) | PrimType::U(n) => n == 8 || n == 16 || n == 32 || n == 64,
+            _ => true,
+        }
+    }
 }
 
 impl Expr {
@@ -111,7 +119,8 @@ impl Expr {
     pub open spec fn of_type(self, arch: Arch, ctx: Seq<PrimType>, ty: PrimType) -> bool
         decreases self
     {
-        match self {
+        &&& ty.wf()
+        &&& match self {
             Expr::Var(i) => i < ctx.len() && ty == ctx[i as int],
             Expr::Lit(c, cty) => ty == cty,
             Expr::Cast(e, cty) => ty == cty && exists |ety: PrimType| e.of_type(arch, ctx, ety),

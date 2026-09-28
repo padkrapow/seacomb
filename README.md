@@ -24,10 +24,11 @@ use std::io::Write;
 let mut filter = Filter::new_native(Action::Allow).unwrap();
 
 // Make write to stderr (fd 2) fail with EPERM.
-filter.add_rule(Action::Errno(1), Syscall::Write, vec![ArgCmp::eq(0, 2)]).unwrap();
+let stderr = Expr::Var(0).eq(Expr::Lit(2, PrimType::U(32)));
+filter.add_rule(Action::Errno(1), Syscall::Write, stderr).unwrap();
 
 // Kill the process on execve.
-filter.add_rule(Action::KillProcess, Syscall::Execve, vec![]).unwrap();
+filter.add_rule(Action::KillProcess, Syscall::Execve, Cond::True).unwrap();
 
 #[cfg(target_os = "linux")]
 {

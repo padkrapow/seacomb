@@ -15,7 +15,7 @@ fn actions() {
         (Action::KillThread, Expect::Sigsys),
         (Action::KillProcess, Expect::Sigsys),
     ] {
-        let filter = Filter::new_native_with_rule(Action::Allow, action, Syscall::Getpid, vec![]).unwrap();
+        let filter = Filter::new_native_with_rule(Action::Allow, action, Syscall::Getpid, Cond::True).unwrap();
         unsafe { filter.install_and_check(libc::SYS_getpid, [0; 6], expect) };
     }
 }
@@ -24,8 +24,8 @@ fn actions() {
 #[test]
 fn default_action() {
     let mut filter = Filter::new_native(Expect::DENY).unwrap();
-    filter.add_rule(Action::Allow, Syscall::Exit, vec![]).unwrap();
-    filter.add_rule(Action::Allow, Syscall::ExitGroup, vec![]).unwrap();
+    filter.add_rule(Action::Allow, Syscall::Exit, Cond::True).unwrap();
+    filter.add_rule(Action::Allow, Syscall::ExitGroup, Cond::True).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_getpid, [0; 6], Expect::Denied);
         filter.install_and_check(libc::SYS_getppid, [0; 6], Expect::Denied);
@@ -35,15 +35,15 @@ fn default_action() {
 /// A rejected update leaves the rules added before it in force.
 #[test]
 fn failed_add_keeps_rules() {
-    let mut filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Getpid, vec![]).unwrap();
+    let mut filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Getpid, Cond::True).unwrap();
     assert!(matches!(
         filter.add_arch(Arch::native().unwrap()),
         Err(Error::Check(CheckError::DuplicateArch))
     ));
     for (action, conds) in [
-        (Action::Errno(4096), vec![]),
-        (Action::Errno(8), vec![ArgCmp::eq(u32::MAX, 0)]),
-        (Action::Errno(8), vec![ArgCmp::eq(0, 0), ArgCmp::eq(6, 0)]),
+        (Action::Errno(4096), Cond::True),
+        (Action::Errno(8), Var(u32::MAX).eq(Var(u32::MAX))),
+        (Action::Errno(8), Var(0).eq(Var(0)).and(Var(6).eq(Var(6)))),
     ] {
         assert!(filter.add_rule(action, Syscall::Getppid, conds).is_err());
     }
@@ -74,7 +74,7 @@ fn failed_bad_arch_keeps_action() {
 /// An argument test narrows a rule to the calls that pass it.
 #[test]
 fn arg_eq() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Lseek, vec![ArgCmp::eq(0, 42)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Lseek, Var(0).eq(Lit(42, U(32)))).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_lseek, [42, 0, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_lseek, [43, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -85,7 +85,7 @@ fn arg_eq() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn arg_high_word() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Lseek, vec![ArgCmp::eq(1, 0x1_0000_0000)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Lseek, Var(1).eq(Lit(0x1_0000_0000, IWord))).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_lseek, [43, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_lseek, [43, 1, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -95,7 +95,7 @@ fn arg_high_word() {
 /// A test on a 16-bit argument ignores the register bits above it.
 #[test]
 fn narrow_arg() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Fchmod, vec![ArgCmp::eq(1, 0o644)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Fchmod, Var(1).eq(Lit(0o644, U(16)))).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_fchmod, [fd, 0o644, 0, 0, 0, 0], Expect::Denied);
@@ -107,7 +107,7 @@ fn narrow_arg() {
 /// An ordering test on a signed argument compares it as signed.
 #[test]
 fn signed_arg() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Ftruncate, vec![ArgCmp::lt(1, -1i64 as u64)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Ftruncate, Var(1).lt(Lit(-1, IWord))).unwrap();
     let fd = libc::c_ulong::MAX;
     for (length, expect) in [
         (libc::c_long::MIN, Expect::Denied),
@@ -123,8 +123,9 @@ fn signed_arg() {
 /// A rule's argument tests must all hold, whatever order they were given in.
 #[test]
 fn six_conds() {
-    let conds = (0..6).rev().map(|arg| ArgCmp::eq(arg, arg as u64 + 1)).collect();
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::ProcessVmReadv, conds).unwrap();
+    let sig = Syscall::ProcessVmReadv.signature(Arch::native().unwrap());
+    let cond = (0..6).rev().map(|i| Var(i).eq(Lit(i as i64 + 1, sig[i as usize]))).reduce(Cond::and).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::ProcessVmReadv, cond).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_process_vm_readv, [1, 2, 3, 4, 5, 6], Expect::Denied);
         filter.install_and_check(libc::SYS_process_vm_readv, [2, 2, 3, 4, 5, 6], Expect::Errno(libc::EINVAL));
@@ -140,7 +141,7 @@ fn six_conds() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn eq_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::ProcessVmWritev, vec![ArgCmp::eq(5, 0x1_0000_0001)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::ProcessVmWritev, Var(5).eq(Lit(0x1_0000_0001, UWord))).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 0x1_0000_0001], Expect::Denied);
         filter.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 1], Expect::Errno(libc::EINVAL));
@@ -153,7 +154,7 @@ fn eq_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ne_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Munmap, vec![ArgCmp::ne(0, 0x1_0000_0001)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Munmap, Var(0).ne(Lit(0x1_0000_0001, UWord))).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_munmap, [0x1_0000_0001, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
         filter.install_and_check(libc::SYS_munmap, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -166,8 +167,8 @@ fn ne_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn lt_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Msync, vec![ArgCmp::lt(1, 0x1_0000_0001)]).unwrap();
-    let never = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Msync, vec![ArgCmp::lt(1, 0)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Msync, Var(1).lt(Lit(0x1_0000_0001, UWord))).unwrap();
+    let never = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Msync, Var(1).lt(Lit(0, UWord))).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_msync, [1, 0xffff_ffff, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_msync, [1, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
@@ -182,8 +183,8 @@ fn lt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn le_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Read, vec![ArgCmp::le(2, 0x1_0000_0000)]).unwrap();
-    let always = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Read, vec![ArgCmp::le(2, u64::MAX)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Read, Var(2).le(Lit(0x1_0000_0000, UWord))).unwrap();
+    let always = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Read, Var(2).le(Lit(-1, UWord))).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_read, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Denied);
@@ -199,8 +200,8 @@ fn le_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn gt_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Sendfile, vec![ArgCmp::gt(3, 0xffff_ffff)]).unwrap();
-    let never = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Sendfile, vec![ArgCmp::gt(3, u64::MAX)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Sendfile, Var(3).gt(Lit(0xffff_ffff, UWord))).unwrap();
+    let never = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Sendfile, Var(3).gt(Lit(-1, UWord))).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_sendfile, [fd, fd, 0, 0xffff_fffe, 0, 0], Expect::Errno(libc::EBADF));
@@ -216,8 +217,8 @@ fn gt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ge_64() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Splice, vec![ArgCmp::ge(4, 0x1_0000_0000)]).unwrap();
-    let always = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Splice, vec![ArgCmp::ge(4, 0)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Splice, Var(4).ge(Lit(0x1_0000_0000, UWord))).unwrap();
+    let always = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Splice, Var(4).ge(Lit(0, UWord))).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(libc::SYS_splice, [fd, 0, fd, 0, 0xffff_ffff, 0], Expect::Errno(libc::EBADF));
@@ -233,10 +234,10 @@ fn ge_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn masked_eq_64() {
-    let cond = ArgCmp::masked_eq(5, 0xf0_0000_000f, 0xa0_0000_0005);
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::EpollPwait, vec![cond]).unwrap();
-    let cond = ArgCmp::masked_eq(5, 0xffff_ffff_0000_0000, 0x1_0000_0000);
-    let high = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::EpollPwait, vec![cond]).unwrap();
+    let cond = Cond::masked_eq(5, UWord, 0xf0_0000_000f, 0xa0_0000_0005);
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::EpollPwait, cond).unwrap();
+    let cond = Cond::masked_eq(5, UWord, 0xffff_ffff_0000_0000, 0x1_0000_0000);
+    let high = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::EpollPwait, cond).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xa0_0000_0005], Expect::Denied);
         filter.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xaf_ffff_fff5], Expect::Denied);
@@ -251,7 +252,7 @@ fn masked_eq_64() {
 /// Masked equality with a zero mask matches every value.
 #[test]
 fn zero_mask() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Mprotect, vec![ArgCmp::masked_eq(0, 0, 0)]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Mprotect, Cond::masked_eq(0, UWord, 0, 0)).unwrap();
     unsafe {
         filter.install_and_check(libc::SYS_mprotect, [0, 0, 0, 0, 0, 0], Expect::Denied);
         filter.install_and_check(libc::SYS_mprotect, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -265,8 +266,8 @@ fn zero_mask() {
 fn unsigned_arg() {
     let sign = (1 as libc::c_ulong) << (libc::c_ulong::BITS - 1);
     let policy_sign = 1u64 << (libc::c_ulong::BITS - 1);
-    let below = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Write, vec![ArgCmp::lt(2, policy_sign)]).unwrap();
-    let above = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Write, vec![ArgCmp::gt(2, policy_sign)]).unwrap();
+    let below = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Write, Var(2).lt(Lit(policy_sign as i64, UWord))).unwrap();
+    let above = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Write, Var(2).gt(Lit(policy_sign as i64, UWord))).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         below.install_and_check(libc::SYS_write, [fd, 0, 0, 0, 0, 0], Expect::Denied);
@@ -294,8 +295,8 @@ fn no_arch() {
 fn x86_64_x32() {
     let mut filter = Filter::new_native(Expect::DENY).unwrap();
     filter.on_bad_arch(Action::Errno(libc::EPERM as u16)).unwrap();
-    filter.add_rule(Action::Allow, Syscall::Exit, vec![]).unwrap();
-    filter.add_rule(Action::Allow, Syscall::ExitGroup, vec![]).unwrap();
+    filter.add_rule(Action::Allow, Syscall::Exit, Cond::True).unwrap();
+    filter.add_rule(Action::Allow, Syscall::ExitGroup, Cond::True).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         filter.install_and_check(-1, [fd, 0, 0, 0, 0, 0], Expect::Denied);
@@ -311,7 +312,7 @@ fn x86_64_x32() {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[test]
 fn x86_64_skip() {
-    let mut filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Skip, vec![]).unwrap();
+    let mut filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Skip, Cond::True).unwrap();
     filter.on_bad_arch(Action::Errno(libc::EPERM as u16)).unwrap();
     unsafe { filter.install_and_check(-1, [0; 6], Expect::Denied) };
 }
@@ -320,7 +321,7 @@ fn x86_64_skip() {
 #[cfg(target_arch = "x86")]
 #[test]
 fn x86_socketcall() {
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Socket, vec![]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Socket, Cond::True).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     let bind_args: [libc::c_ulong; 3] = [libc::c_ulong::MAX, 0, 0];
     unsafe {
@@ -335,7 +336,7 @@ fn x86_socketcall() {
 #[test]
 fn x86_socketcall_exact_conds() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
-    filter.add_rule_exact(Expect::DENY, Syscall::Socket, vec![ArgCmp::eq(0, 1)]).unwrap();
+    filter.add_rule_exact(Expect::DENY, Syscall::Socket, Var(0).eq(Lit(1, I(32)))).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     unsafe {
         filter.install_and_check(libc::SYS_socket, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -349,7 +350,7 @@ fn x86_socketcall_exact_conds() {
 #[test]
 fn x86_socketcall_exact() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
-    filter.add_rule_exact(Expect::DENY, Syscall::Socket, vec![]).unwrap();
+    filter.add_rule_exact(Expect::DENY, Syscall::Socket, Cond::True).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     unsafe {
         filter.install_and_check(libc::SYS_socket, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -363,7 +364,7 @@ fn x86_socketcall_exact() {
 fn x86_ipc() {
     // The i386 semget number in `arch/x86/entry/syscalls/syscall_32.tbl`, which `libc` does not define.
     let semget: libc::c_long = 393;
-    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Semget, vec![]).unwrap();
+    let filter = Filter::new_native_with_rule(Action::Allow, Expect::DENY, Syscall::Semget, Cond::True).unwrap();
     unsafe {
         filter.install_and_check(semget, [0; 6], Expect::Denied);
         filter.install_and_check(libc::SYS_ipc, [2, 0, 0, 0, 0, 0], Expect::Denied);
@@ -377,7 +378,7 @@ fn x86_ipc() {
 fn x86_ipc_exact() {
     let semget: libc::c_long = 393;
     let mut filter = Filter::new_native(Action::Allow).unwrap();
-    filter.add_rule_exact(Expect::DENY, Syscall::Semget, vec![]).unwrap();
+    filter.add_rule_exact(Expect::DENY, Syscall::Semget, Cond::True).unwrap();
     unsafe {
         filter.install_and_check(semget, [0; 6], Expect::Denied);
         filter.install_and_check(libc::SYS_ipc, [0x1_0002, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
@@ -390,7 +391,7 @@ fn x86_ipc_exact() {
 fn aarch64_no_alias() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     filter.add_arch(Arch::X86_64).unwrap();
-    filter.add_rule(Expect::DENY, Syscall::Open, vec![]).unwrap();
+    filter.add_rule(Expect::DENY, Syscall::Open, Cond::True).unwrap();
     unsafe {
         // The x86_64 open number is io_submit on aarch64.
         filter.install_and_check(libc::SYS_io_submit, [0; 6], Expect::Errno(libc::EINVAL));
@@ -424,8 +425,8 @@ fn rule_payloads() {
         (Action::Trap(0), Action::Trap(0), Action::Trap(u16::MAX)),
     ] {
         let mut filter = Filter::new_native(default).unwrap();
-        filter.add_rule(same, Syscall::Getpid, vec![]).unwrap();
-        filter.add_rule(different, Syscall::Getpid, vec![]).unwrap();
+        filter.add_rule(same, Syscall::Getpid, Cond::True).unwrap();
+        filter.add_rule(different, Syscall::Getpid, Cond::True).unwrap();
     }
 }
 
@@ -439,7 +440,7 @@ fn payload_limits() {
         Action::Trace(u16::MAX),
         Action::Trap(u16::MAX),
     ] {
-        Filter::new_native_with_rule(Action::Allow, action, Syscall::Getpid, vec![]).unwrap();
+        Filter::new_native_with_rule(Action::Allow, action, Syscall::Getpid, Cond::True).unwrap();
     }
     for errno in [4096, u16::MAX] {
         assert!(matches!(
@@ -466,25 +467,25 @@ fn duplicate_arch() {
 /// A rule that repeats the default action is allowed.
 #[test]
 fn repeat_default() {
-    assert!(Filter::new_native_with_rule(Action::Allow, Action::Allow, Syscall::Getpid, vec![]).is_ok());
+    assert!(Filter::new_native_with_rule(Action::Allow, Action::Allow, Syscall::Getpid, Cond::True).is_ok());
 }
 
 /// An argument the architecture does not have is turned down.
 #[test]
 fn arg_out_of_range() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Lseek, vec![ArgCmp::eq(6, 0)]),
-        Err(Error::Check(CheckError::InvalidArg { given: 6, total: 3, syscall: Syscall::Lseek })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Lseek, Var(6).eq(Var(6))),
+        Err(Error::Check(CheckError::InvalidArg { given: 6, total: 3 })),
     ));
 }
 
 /// A rule on `Syscall::Skip` is allowed, but not with argument tests.
 #[test]
 fn skip_rule() {
-    assert!(Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Skip, vec![]).is_ok());
+    assert!(Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Skip, Cond::True).is_ok());
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Skip, vec![ArgCmp::eq(0, 0)]),
-        Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0, syscall: Syscall::Skip })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Skip, Var(0).eq(Var(0))),
+        Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
 
@@ -492,61 +493,37 @@ fn skip_rule() {
 #[test]
 fn no_args() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Getpid, vec![ArgCmp::eq(0, 0)]),
-        Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0, syscall: Syscall::Getpid })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Getpid, Var(0).eq(Var(0))),
+        Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
 
-/// A rejected argument test reports the type of the argument it was on.
+/// A rejected argument test reports the operator and the types it was given.
 #[test]
 fn arg_type_errors() {
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmodat, vec![ArgCmp::lt(1, 0)]),
-        Err(Error::Check(CheckError::UnsupportedCompare { arg: 1, ty: PrimType::Ptr, .. })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmodat, Var(1).lt(Lit(0, Ptr))),
+        Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Lt, lhs: Ptr, rhs: Ptr, .. })),
     ));
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmod, vec![ArgCmp::eq(1, 0x1_0000)]),
-        Err(Error::Check(CheckError::InvalidCompareValue { arg: 1, ty: PrimType::U(16), .. })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmod, Var(1).eq(Lit(1, I(16)))),
+        Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Eq, lhs: U(16), rhs: I(16) })),
     ));
+    let masked = Var(1).and(Lit(0x1_0000, U(32))).eq(Lit(0, U(16)));
     assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmod, vec![ArgCmp::masked_eq(1, 0x1_0000, 0)]),
-        Err(Error::Check(CheckError::InvalidCompareMask { arg: 1, ty: PrimType::U(16), .. })),
+        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Fchmod, masked),
+        Err(Error::Check(CheckError::BinOpTypes { op: BinOp::And, lhs: U(16), rhs: U(32), .. })),
     ));
 }
 
-/// Masked equality rejects a value with bits outside its mask.
+/// A `u32` constant fits an `off_t` argument only where the word is wider than 32 bits.
 #[test]
-fn masked_value_outside_mask() {
-    assert!(matches!(
-        Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Munmap, vec![ArgCmp::masked_eq(0, 0xf0, 0x1_af)]),
-        Err(Error::Check(CheckError::InvalidMaskedValue { arg: 0, mask: 0xf0, value: 0x1_af, .. })),
-    ));
-}
-
-/// A 32-bit architecture rejects comparison values that do not fit a word.
-#[cfg(target_pointer_width = "32")]
-#[test]
-fn wide_value_32() {
-    for make_cmp in [
-        ArgCmp::eq as fn(u32, u64) -> ArgCmp,
-        ArgCmp::ne, ArgCmp::lt, ArgCmp::le, ArgCmp::gt, ArgCmp::ge,
-    ] {
-        assert!(matches!(
-            Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Mmap2, vec![make_cmp(0, 0x1_8000_0000)]),
-            Err(Error::Check(CheckError::InvalidCompareValue { .. })),
-        ));
-    }
-}
-
-/// A 32-bit architecture rejects masks that do not fit a word.
-#[cfg(target_pointer_width = "32")]
-#[test]
-fn wide_mask_32() {
-    for mask in [0xffff_ffff_0000_0000, 0x1_0000_00ff] {
-        assert!(matches!(
-            Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Mmap2, vec![ArgCmp::masked_eq(0, mask, 0)]),
-            Err(Error::Check(CheckError::InvalidCompareMask { .. })),
-        ));
+fn word_literal() {
+    let result = Filter::new_native_with_rule(Action::Allow, Action::Errno(1), Syscall::Lseek, Var(1).eq(Lit(1, U(32))));
+    if cfg!(target_pointer_width = "64") {
+        assert!(result.is_ok());
+    } else {
+        assert!(matches!(result, Err(Error::Check(CheckError::CmpTypes { lhs: IWord, rhs: U(32), .. }))));
     }
 }
 
@@ -554,7 +531,7 @@ fn wide_mask_32() {
 #[test]
 fn errno_edges() {
     for (errno, expect) in [(0, Expect::Ok), (4094, Expect::Errno(4094)), (4095, Expect::Errno(4095))] {
-        let filter = Filter::new_native_with_rule(Action::Allow, Action::Errno(errno), Syscall::Lseek, vec![]).unwrap();
+        let filter = Filter::new_native_with_rule(Action::Allow, Action::Errno(errno), Syscall::Lseek, Cond::True).unwrap();
         unsafe { filter.install_and_check(libc::SYS_lseek, [libc::c_ulong::MAX, 0, 0, 0, 0, 0], expect) };
     }
 }
@@ -564,7 +541,7 @@ fn errno_edges() {
 fn long_chain() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     for count in 0..300 {
-        filter.add_rule(Expect::DENY, Syscall::Read, vec![ArgCmp::eq(2, count)]).unwrap();
+        filter.add_rule(Expect::DENY, Syscall::Read, Var(2).eq(Lit(count, UWord))).unwrap();
     }
     let fd = libc::c_ulong::MAX;
     unsafe {
@@ -581,7 +558,7 @@ fn long_chain() {
 fn too_large() {
     let mut filter = Filter::new_native(Action::Allow).unwrap();
     for count in 0..4096 {
-        filter.add_rule(Expect::DENY, Syscall::Read, vec![ArgCmp::eq(2, count)]).unwrap();
+        filter.add_rule(Expect::DENY, Syscall::Read, Var(2).eq(Lit(count, UWord))).unwrap();
     }
     let before = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
     assert!(matches!(filter.install(), Err(Error::FilterTooLarge)));

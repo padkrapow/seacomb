@@ -35,19 +35,14 @@ impl Rule {
             by (bit_vector);
     }
 
-    /// Whether the rule's conditions from `i` on hold of `ev` on `arch`.
-    pub(super) open spec fn conds_hold(self, arch: Arch, ev: Event, i: int) -> bool {
-        forall |j: int| #![trigger self.conds@[j]]
-            i <= j < self.conds@.len() ==> self.conds@[j].eval(arch, self.syscall, ev.args)
-    }
-
     /// Whether the rule's body accepts `ev`, the test for syscall number `nr` having passed.
     pub(super) open spec fn body_holds(self, arch: Arch, nr: u32, ev: Event) -> bool {
         if self.spec_mux_nr(arch) == Some(nr) {
             self.spec_mux_arg(arch) == Some((ev.args[0]
                 & if self.syscall.to_ipc_arg() is Some { 0xFFFF } else { 0xFFFF_FFFF }) as u32)
         } else {
-            self.conds_hold(arch, ev, 0)
+            let sig = self.syscall.spec_signature(arch);
+            self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
         }
     }
 

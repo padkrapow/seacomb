@@ -7,6 +7,8 @@ mod cond;
 mod filter;
 
 use seacomb::*;
+use seacomb::PrimType::*;
+use seacomb::Expr::{Lit, Var};
 
 /// The result a syscall should come back with.
 #[derive(Debug, Clone, Copy)]
@@ -44,14 +46,14 @@ impl Expect {
 
 /// Test helpers on `Filter`.
 trait FilterExt {
-    /// Returns a native filter with default action `default` and the one rule `action` on `syscall` under `conds`.
-    fn new_native_with_rule(default: Action, action: Action, syscall: Syscall, conds: Vec<ArgCmp>) -> Result<Filter, Error>;
+    /// Returns a native filter with default action `default` and the one rule `action` on `syscall` under `cond`.
+    fn new_native_with_rule(default: Action, action: Action, syscall: Syscall, cond: Cond) -> Result<Filter, Error>;
 
-    /// Returns a native filter that allows by default and denies `syscall` under `conds`.
-    fn new_native_deny(syscall: Syscall, conds: Vec<ArgCmp>) -> Filter;
+    /// Returns a native filter that allows by default and denies `syscall` under `cond`.
+    fn new_native_deny(syscall: Syscall, cond: Cond) -> Filter;
 
     /// Returns a filter over `archs` that allows by default, or the error adding `archs` or the rule gave.
-    fn with_rule(archs: &[Arch], syscall: Syscall, conds: Vec<ArgCmp>) -> Result<Filter, Error>;
+    fn with_rule(archs: &[Arch], syscall: Syscall, cond: Cond) -> Result<Filter, Error>;
 
     /// Runs `call`, which must leave Rust's memory alone, in a child that has this filter installed, and returns its result or the signal that killed the child.
     unsafe fn install_and_run<A: Copy>(&self, call: impl FnOnce() -> A) -> Result<A, libc::c_int>;
@@ -61,23 +63,23 @@ trait FilterExt {
 }
 
 impl FilterExt for Filter {
-    fn new_native_with_rule(default: Action, action: Action, syscall: Syscall, conds: Vec<ArgCmp>) -> Result<Filter, Error> {
+    fn new_native_with_rule(default: Action, action: Action, syscall: Syscall, cond: Cond) -> Result<Filter, Error> {
         let mut filter = Filter::new_native(default)?;
-        filter.add_rule(action, syscall, conds)?;
+        filter.add_rule(action, syscall, cond)?;
         Ok(filter)
     }
 
     #[track_caller]
-    fn new_native_deny(syscall: Syscall, conds: Vec<ArgCmp>) -> Filter {
-        Filter::new_native_with_rule(Action::Allow, Expect::DENY, syscall, conds).unwrap()
+    fn new_native_deny(syscall: Syscall, cond: Cond) -> Filter {
+        Filter::new_native_with_rule(Action::Allow, Expect::DENY, syscall, cond).unwrap()
     }
 
-    fn with_rule(archs: &[Arch], syscall: Syscall, conds: Vec<ArgCmp>) -> Result<Filter, Error> {
+    fn with_rule(archs: &[Arch], syscall: Syscall, cond: Cond) -> Result<Filter, Error> {
         let mut filter = Filter::new(Action::Allow)?;
         for &arch in archs {
             filter.add_arch(arch)?;
         }
-        filter.add_rule(Expect::DENY, syscall, conds)?;
+        filter.add_rule(Expect::DENY, syscall, cond)?;
         Ok(filter)
     }
 

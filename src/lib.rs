@@ -16,10 +16,11 @@ mod spec;
 pub mod prop;
 
 use vstd::prelude::*;
+use std::sync::Arc;
 
 pub use crate::compiler::CompileError;
 pub use crate::check::CheckError;
-pub use crate::spec::{policy::*, syscall::*, cbpf::*};
+pub use crate::spec::{policy::*, syscall::*, cbpf::*, expr::*};
 
 verus! {
 
@@ -68,40 +69,124 @@ impl Arch {
     }
 }
 
-impl ArgCmp {
-    /// Tests whether the argument at index `arg` equals `val`.
-    pub fn eq(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Eq, a: val, b: 0 }
+#[allow(clippy::should_implement_trait)]
+impl Expr {
+    /// This expression converted to `ty`.
+    pub fn cast(self, ty: PrimType) -> (res: Expr)
+        ensures res == Expr::Cast(Arc::new(self), ty)
+    {
+        Expr::Cast(Arc::new(self), ty)
     }
 
-    /// Tests whether the argument at index `arg` does not equal `val`.
-    pub fn ne(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Ne, a: val, b: 0 }
+    /// The sum of this expression and `other`.
+    pub fn add(self, other: Expr) -> (res: Expr)
+        ensures res == Expr::BinOp(BinOp::Add, Arc::new(self), Arc::new(other))
+    {
+        Expr::BinOp(BinOp::Add, Arc::new(self), Arc::new(other))
     }
 
-    /// Tests whether the argument at index `arg` is less than `val`.
-    pub fn lt(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Lt, a: val, b: 0 }
+    /// The difference of this expression and `other`.
+    pub fn sub(self, other: Expr) -> (res: Expr)
+        ensures res == Expr::BinOp(BinOp::Sub, Arc::new(self), Arc::new(other))
+    {
+        Expr::BinOp(BinOp::Sub, Arc::new(self), Arc::new(other))
     }
 
-    /// Tests whether the argument at index `arg` is less than or equal to `val`.
-    pub fn le(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Le, a: val, b: 0 }
+    /// The bitwise and of this expression and `other`.
+    pub fn and(self, other: Expr) -> (res: Expr)
+        ensures res == Expr::BinOp(BinOp::And, Arc::new(self), Arc::new(other))
+    {
+        Expr::BinOp(BinOp::And, Arc::new(self), Arc::new(other))
     }
 
-    /// Tests whether the argument at index `arg` is greater than `val`.
-    pub fn gt(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Gt, a: val, b: 0 }
+    /// The bitwise or of this expression and `other`.
+    pub fn or(self, other: Expr) -> (res: Expr)
+        ensures res == Expr::BinOp(BinOp::Or, Arc::new(self), Arc::new(other))
+    {
+        Expr::BinOp(BinOp::Or, Arc::new(self), Arc::new(other))
     }
 
-    /// Tests whether the argument at index `arg` is greater than or equal to `val`.
-    pub fn ge(arg: u32, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::Ge, a: val, b: 0 }
+    /// The bitwise exclusive or of this expression and `other`.
+    pub fn xor(self, other: Expr) -> (res: Expr)
+        ensures res == Expr::BinOp(BinOp::Xor, Arc::new(self), Arc::new(other))
+    {
+        Expr::BinOp(BinOp::Xor, Arc::new(self), Arc::new(other))
     }
 
-    /// Tests whether the argument at index `arg` equals `val` under `mask`.
-    pub fn masked_eq(arg: u32, mask: u64, val: u64) -> Self {
-        ArgCmp { arg, op: Compare::MaskedEq, a: mask, b: val }
+    /// Whether this expression equals `other`.
+    pub fn eq(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Cmp(CmpOp::Eq, Arc::new(self), Arc::new(other))
+    {
+        Cond::Cmp(CmpOp::Eq, Arc::new(self), Arc::new(other))
+    }
+
+    /// Whether this expression differs from `other`.
+    pub fn ne(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Not(Arc::new(Cond::Cmp(CmpOp::Eq, Arc::new(self), Arc::new(other))))
+    {
+        self.eq(other).not()
+    }
+
+    /// Whether this expression is less than `other`.
+    pub fn lt(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Cmp(CmpOp::Lt, Arc::new(self), Arc::new(other))
+    {
+        Cond::Cmp(CmpOp::Lt, Arc::new(self), Arc::new(other))
+    }
+
+    /// Whether this expression is at most `other`.
+    pub fn le(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Cmp(CmpOp::Le, Arc::new(self), Arc::new(other))
+    {
+        Cond::Cmp(CmpOp::Le, Arc::new(self), Arc::new(other))
+    }
+
+    /// Whether this expression is greater than `other`.
+    pub fn gt(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Not(Arc::new(Cond::Cmp(CmpOp::Le, Arc::new(self), Arc::new(other))))
+    {
+        self.le(other).not()
+    }
+
+    /// Whether this expression is at least `other`.
+    pub fn ge(self, other: Expr) -> (res: Cond)
+        ensures res == Cond::Not(Arc::new(Cond::Cmp(CmpOp::Lt, Arc::new(self), Arc::new(other))))
+    {
+        self.lt(other).not()
+    }
+}
+
+#[allow(clippy::should_implement_trait)]
+impl Cond {
+    /// Whether argument `i` has the bits `value` under `mask`, both of type `ty`.
+    pub fn masked_eq(i: u32, ty: PrimType, mask: u64, value: u64) -> (res: Cond)
+        ensures res == Cond::Cmp(CmpOp::Eq,
+            Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(i)), Arc::new(Expr::Lit(mask as i64, ty)))),
+            Arc::new(Expr::Lit(value as i64, ty)))
+    {
+        Expr::Var(i).and(Expr::Lit(mask as i64, ty))
+            .eq(Expr::Lit(value as i64, ty))
+    }
+
+    /// Whether this condition and `other` both hold.
+    pub fn and(self, other: Cond) -> (res: Cond)
+        ensures res == Cond::And(Arc::new(self), Arc::new(other))
+    {
+        Cond::And(Arc::new(self), Arc::new(other))
+    }
+
+    /// Whether this condition or `other` holds.
+    pub fn or(self, other: Cond) -> (res: Cond)
+        ensures res == Cond::Or(Arc::new(self), Arc::new(other))
+    {
+        Cond::Or(Arc::new(self), Arc::new(other))
+    }
+
+    /// Whether this condition fails.
+    pub fn not(self) -> (res: Cond)
+        ensures res == Cond::Not(Arc::new(self))
+    {
+        Cond::Not(Arc::new(self))
     }
 }
 
@@ -233,9 +318,8 @@ impl Filter {
         Ok(())
     }
 
-    /// Applies `action` to `syscall` when every argument test in `conds` holds.
-    pub fn add_rule(&mut self, action: Action, syscall: Syscall, conds: Vec<ArgCmp>)
-        -> (res: Result<(), Error>)
+    /// Applies `action` to `syscall` when `cond` holds.
+    pub fn add_rule(&mut self, action: Action, syscall: Syscall, cond: Cond) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
@@ -243,18 +327,21 @@ impl Filter {
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
             res is Ok ==>
-                final(self).policy().rules@
-                == old(self).policy().rules@.push(Rule { action, syscall, conds, no_mux: false }),
+                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
+                    action,
+                    syscall,
+                    cond: Arc::new(cond),
+                    no_mux: false,
+                }),
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        self.add_rule_with_mux(action, syscall, conds, false)
+        self.add_rule_with_mux(action, syscall, cond, false)
     }
 
     /// Adds a rule for the exact syscall number only. For example, on x86,
     /// while `bind(..)` and `socketcall(2, ..)` have the same behavior,
     /// adding a rule for `Syscall::Bind` only applies to the first case.
-    pub fn add_rule_exact(&mut self, action: Action, syscall: Syscall, conds: Vec<ArgCmp>)
-        -> (res: Result<(), Error>)
+    pub fn add_rule_exact(&mut self, action: Action, syscall: Syscall, cond: Cond) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
@@ -262,14 +349,18 @@ impl Filter {
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
             res is Ok ==>
-                final(self).policy().rules@
-                == old(self).policy().rules@.push(Rule { action, syscall, conds, no_mux: true }),
+                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
+                    action,
+                    syscall,
+                    cond: Arc::new(cond),
+                    no_mux: true,
+                }),
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        self.add_rule_with_mux(action, syscall, conds, true)
+        self.add_rule_with_mux(action, syscall, cond, true)
     }
 
-    fn add_rule_with_mux(&mut self, action: Action, syscall: Syscall, conds: Vec<ArgCmp>, no_mux: bool)
+    fn add_rule_with_mux(&mut self, action: Action, syscall: Syscall, cond: Cond, no_mux: bool)
         -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
@@ -278,11 +369,15 @@ impl Filter {
             final(self).policy().act_no_match == old(self).policy().act_no_match,
             final(self).policy().act_bad_arch == old(self).policy().act_bad_arch,
             res is Ok ==>
-                final(self).policy().rules@
-                == old(self).policy().rules@.push(Rule { action, syscall, conds, no_mux }),
+                final(self).policy().rules@ == old(self).policy().rules@.push(Rule {
+                    action,
+                    syscall,
+                    cond: Arc::new(cond),
+                    no_mux,
+                }),
             res is Err ==> final(self).policy() == old(self).policy(),
     {
-        let rule = Rule { action, syscall, conds, no_mux };
+        let rule = Rule { action, syscall, cond: Arc::new(cond), no_mux };
         if let Err(err) = rule.check(self.policy.archs.as_slice()) {
             return Err(Error::Check(err));
         }

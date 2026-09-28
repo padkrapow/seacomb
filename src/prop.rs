@@ -5,7 +5,6 @@ use crate::spec::cbpf::*;
 use crate::spec::policy::*;
 
 mod action;
-mod arg;
 mod chain;
 mod policy;
 
@@ -93,34 +92,6 @@ impl Policy {
                 let j = choose |j: int| #[trigger] Self::chain_wins(policies, ev, b, j);
                 assert(i == j);
                 policies[i].lemma_eval_unique(ev, a, b);
-            }
-        }
-    }
-}
-
-impl ArgCmp {
-    /// Evaluation result is architecture-independent.
-    pub proof fn theorem_eval_arch_indep(
-        self, syscall: crate::spec::syscall::Syscall,
-        a1: Arch, args1: Seq<u64>,
-        a2: Arch, args2: Seq<u64>,
-    )
-        requires
-            self.wf(a1, syscall),
-            self.wf(a2, syscall),
-            syscall.spec_signature(a1)[self.arg as int]
-                == syscall.spec_signature(a2)[self.arg as int],
-            a1.interp_args(args1, syscall.spec_signature(a1))[self.arg as int]
-                == a2.interp_args(args2, syscall.spec_signature(a2))[self.arg as int],
-        ensures
-            self.eval(a1, syscall, args1) == self.eval(a2, syscall, args2),
-    {
-        let ty = syscall.spec_signature(a1)[self.arg as int];
-        if ty.bits(a1) != ty.bits(a2) {
-            if ty.bits(a1) == 32 {
-                self.lemma_eval_narrow_wide(syscall, a1, args1, a2, args2);
-            } else {
-                self.lemma_eval_narrow_wide(syscall, a2, args2, a1, args1);
             }
         }
     }
