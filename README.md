@@ -25,10 +25,10 @@ let policy = policy! {
     default allow on native;
 
     // Make write to stderr (fd 2) fail with EPERM.
-    errno(1) write(fd, buf, count) if fd == 2u32;
+    errno(1) write(fd, _, _) if fd == 2u32;
 
     // Kill the process on execve.
-    kill execve(pathname, argv, envp);
+    kill execve(_, _, _);
 }.unwrap();
 
 #[cfg(target_os = "linux")]
