@@ -1,4 +1,4 @@
-//! Helper macros to construct `Expr`, `Cond`, and `Rule`.
+//! Helper macros to construct `Expr`, `Cond`, `Rule`, and `Policy`.
 
 use vstd::prelude::*;
 use std::sync::Arc;
@@ -189,18 +189,12 @@ macro_rules! cond {
 #[macro_export]
 macro_rules! rule {
     // rule    := ['[' arch (',' arch)* ']'] action ['exact'] syscall '(' names ')' ['if' cond]
-    // action  := kill process | kill thread | trap '(' rust-expr ')' | errno '(' rust-expr ')'
+    // action  := kill | kill_thread | trap '(' rust-expr ')' | errno '(' rust-expr ')'
     //          | trace '(' rust-expr ')' | log | allow | notify | '{' rust-expr '}'
     // syscall := ident | '{' rust-expr '}'
-    (@act $archs:tt kill process $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::KillProcess] $($rest)*) };
-    (@act $archs:tt kill thread $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::KillThread] $($rest)*) };
-    (@act $archs:tt trap ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Trap($e)] $($rest)*) };
-    (@act $archs:tt errno ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Errno($e)] $($rest)*) };
-    (@act $archs:tt trace ($e:expr) $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Trace($e)] $($rest)*) };
-    (@act $archs:tt log $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Log] $($rest)*) };
-    (@act $archs:tt allow $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Allow] $($rest)*) };
-    (@act $archs:tt notify $($rest:tt)*) => { $crate::rule!(@exact $archs [$crate::Action::Notify] $($rest)*) };
-    (@act $archs:tt { $a:expr } $($rest:tt)*) => { $crate::rule!(@exact $archs [$a] $($rest)*) };
+    (@act $archs:tt $a:ident ( $($e:tt)* ) $($rest:tt)*) => { $crate::rule!(@exact $archs [$a ($($e)*)] $($rest)*) };
+    (@act $archs:tt $a:ident $($rest:tt)*) => { $crate::rule!(@exact $archs [$a] $($rest)*) };
+    (@act $archs:tt { $($a:tt)* } $($rest:tt)*) => { $crate::rule!(@exact $archs [{ $($a)* }] $($rest)*) };
     (@act $archs:tt $($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
 
     // `exact` sets `no_mux`.
@@ -212,8 +206,8 @@ macro_rules! rule {
     (@syscall $archs:tt $act:tt $exact:tt $name:ident ( $($names:tt)* ) $($rest:tt)*) => {
         $crate::rule!(@mk $archs $act $exact [const {
             match $crate::Syscall::lookup(stringify!($name)) {
-                Some(s) => s,
-                None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
+                ::core::option::Option::Some(s) => s,
+                ::core::option::Option::None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
             }
         }] [$($names)*] $($rest)*)
     };
@@ -229,7 +223,7 @@ macro_rules! rule {
             $crate::Expr::Var(3), $crate::Expr::Var(4), $crate::Expr::Var(5),
         ];
         $crate::Rule {
-            action: $($act)*,
+            action: $crate::rule!(@action $($act)*),
             syscall: $($sys)*,
             cond: $crate::rule!(@cond $($($c)+)?),
             archs: ::std::vec![$( $crate::rule!(@arch $arch) ),*],
@@ -248,6 +242,18 @@ macro_rules! rule {
     (@name $x:ident) => {};
     (@name _) => {};
     (@name $x:tt) => { compile_error!(concat!("expected an argument name, found `", stringify!($x), "`")) };
+
+    // An action on its own, which `policy!` also takes for its header.
+    (@action kill) => { $crate::Action::KillProcess };
+    (@action kill_thread) => { $crate::Action::KillThread };
+    (@action trap ($e:expr)) => { $crate::Action::Trap($e) };
+    (@action errno ($e:expr)) => { $crate::Action::Errno($e) };
+    (@action trace ($e:expr)) => { $crate::Action::Trace($e) };
+    (@action log) => { $crate::Action::Log };
+    (@action allow) => { $crate::Action::Allow };
+    (@action notify) => { $crate::Action::Notify };
+    (@action { $a:expr }) => { $a };
+    (@action $($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
 
     // arch := x86 | x86_64 | arm | aarch64 | '{' rust-expr '}'
     (@arch x86) => { $crate::Arch::X86 };
@@ -271,7 +277,7 @@ macro_rules! rule {
 /// seacomb::rule!(deny read(fd));
 /// ```
 /// ```compile_fail
-/// seacomb::rule!(kill read(fd));
+/// seacomb::rule!(kill process read(fd));
 /// ```
 /// ```compile_fail
 /// seacomb::rule!(trap read(fd));
@@ -321,10 +327,114 @@ macro_rules! rule {
 #[cfg(doctest)]
 struct RuleMacroTests;
 
+/// Parses a policy into a `Result<Policy, Error>`.
+#[macro_export]
+macro_rules! policy {
+    // policy := header ';' (rule ';')*, where the last ';' may be left off
+    // header := 'default' action 'on' arch (',' arch)* ['else' action]
+    // arch   := native | rule's arch
+    // rule   := rule's rule | '{' rust-expr '}'
+
+    // Takes up to four tokens a step to find each `;`, which keeps long policies under the default `recursion_limit`.
+    (@split [$($done:tt)*] [$($cur:tt)*] ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)*]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a $b]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt $c:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a $b $c]] [] $($rest)*) };
+    (@split $done:tt [$($cur:tt)*] $a:tt $b:tt $c:tt $d:tt $($rest:tt)*) =>
+        { $crate::policy!(@split $done [$($cur)* $a $b $c $d] $($rest)*) };
+    (@split [$($done:tt)*] []) => { $crate::policy!(@mk $($done)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $($rest:tt)*) => { $crate::policy!(@mk $($done)* [$($cur)* $($rest)*]) };
+
+    // Runs in a closure, so a failed step returns its error.
+    (@mk [$($header:tt)*] $([$($rule:tt)*])*) => {
+        (|| -> ::core::result::Result<$crate::Policy, $crate::Error> {
+            #[allow(unused_mut)]
+            let mut policy = $crate::policy!(@header $($header)*);
+            $( policy.add($crate::policy!(@rule $($rule)*))?; )*
+            ::core::result::Result::Ok(policy)
+        })()
+    };
+    (@mk) => { compile_error!("`policy!` wants a `default` header") };
+
+    (@header default $a:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
+        { $crate::policy!(@new [$a] [$($arch),+] $([$($bad)+])?) };
+    (@header default $a:tt $b:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
+        { $crate::policy!(@new [$a $b] [$($arch),+] $([$($bad)+])?) };
+    (@header $($t:tt)*) =>
+        { compile_error!(concat!("expected `default <action> on <archs>`, found `", stringify!($($t)*), "`")) };
+
+    // Without `else`, the bad-arch action stays the one `Policy::new` picks.
+    (@new [$($act:tt)+] [$($arch:tt),+] $([$($bad:tt)+])?) => {{
+        let mut policy = $crate::Policy::new($crate::rule!(@action $($act)+))?;
+        $( policy.add_arch($crate::policy!(@arch $arch))?; )+
+        $( policy.on_bad_arch($crate::rule!(@action $($bad)+))?; )?
+        policy
+    }};
+
+    (@arch native) => { $crate::Arch::native()? };
+    (@arch $a:tt) => { $crate::rule!(@arch $a) };
+
+    (@rule { $r:expr }) => { $r };
+    (@rule $($t:tt)*) => { $crate::rule!($($t)*) };
+
+    ($($t:tt)*) => { $crate::policy!(@split [] [] $($t)*) };
+}
+
+/// Cases that `policy!` should reject.
+///
+/// ```compile_fail
+/// seacomb::policy!();
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(allow read(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(allow read(fd); default allow on x86);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86 arm);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86, arm,);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on mips);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default deny on x86);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86 else);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86 else kill process);
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86; allow read(fd) allow write(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86;; allow read(fd));
+/// ```
+/// ```compile_fail
+/// seacomb::policy!(default allow on x86; [native] allow read(fd));
+/// ```
+#[cfg(doctest)]
+struct PolicyMacroTests;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use crate::{Action, Arch, Cond, Expr, PrimType, Syscall};
+    use crate::{Action, Arch, CheckError, Cond, Error, Expr, PrimType, Syscall};
 
     #[test]
     fn literal_types() {
@@ -454,8 +564,8 @@ mod tests {
             "Rule { action: Allow, syscall: Getpid, cond: True, archs: [], no_mux: false }");
         assert_eq!(format!("{:?}", rule!(errno(1) getpid()).action), "Errno(1)");
         assert_eq!(format!("{:?}", rule!(errno(1 + 1) getpid()).action), "Errno(2)");
-        assert_eq!(format!("{:?}", rule!(kill process getpid()).action), "KillProcess");
-        assert_eq!(format!("{:?}", rule!(kill thread getpid()).action), "KillThread");
+        assert_eq!(format!("{:?}", rule!(kill getpid()).action), "KillProcess");
+        assert_eq!(format!("{:?}", rule!(kill_thread getpid()).action), "KillThread");
         assert_eq!(format!("{:?}", rule!(trap(3) getpid()).action), "Trap(3)");
         assert_eq!(format!("{:?}", rule!(trace(u16::MAX) getpid()).action), "Trace(65535)");
         assert_eq!(format!("{:?}", rule!(log getpid()).action), "Log");
@@ -471,7 +581,7 @@ mod tests {
         assert_eq!(format!("{:?}", rule!(allow _llseek(fd)).syscall), "_Llseek");
         assert_eq!(format!("{:?}", rule!(allow break()).syscall), "Break");
         assert_eq!(format!("{:?}", rule!(allow kill(pid, sig)).syscall), "Kill");
-        assert_eq!(format!("{:?}", rule!(kill process kill(pid, sig)).syscall), "Kill");
+        assert_eq!(format!("{:?}", rule!(kill kill(pid, sig)).syscall), "Kill");
         assert_eq!(format!("{:?}", rule!(allow {syscall}(fd, offset) if offset == 0isize)),
             "Rule { action: Allow, syscall: Lseek, cond: Cmp(Eq, Var(1), Lit(0, IWord)), archs: [], no_mux: false }");
     }
@@ -535,5 +645,152 @@ mod tests {
         assert_eq!(Syscall::lookup("readx"), None);
         assert_eq!(Syscall::lookup("Read"), None);
         assert_eq!(Syscall::lookup(""), None);
+    }
+
+    #[test]
+    fn policy_header() {
+        let other = Arch::Arm;
+        assert_eq!(format!("{:?}", policy!(default allow on x86).unwrap()),
+            "Policy { archs: [X86], rules: [], act_no_match: Allow, act_bad_arch: KillThread }");
+        assert_eq!(format!("{:?}", policy!(default errno(1) on x86, x86_64, arm, aarch64 else kill).unwrap()),
+            "Policy { archs: [X86, X86_64, Arm, Aarch64], rules: [], act_no_match: Errno(1), act_bad_arch: KillProcess }");
+        assert_eq!(format!("{:?}", policy!(default {Action::Log} on {other} else trap(1 + 1)).unwrap()),
+            "Policy { archs: [Arm], rules: [], act_no_match: Log, act_bad_arch: Trap(2) }");
+        assert_eq!(policy!(default kill_thread on native).unwrap().archs, [Arch::native().unwrap()]);
+    }
+
+    #[test]
+    fn policy_rules() {
+        let extra = rule!(log getuid());
+        let policy = policy! {
+            default allow on x86;
+            errno(1) getpid();
+            [x86] kill exact read(fd) if fd == 0u32;
+            {extra.clone()}
+        }.unwrap();
+        assert_eq!(policy.rules, [rule!(errno(1) getpid()), rule!([x86] kill exact read(fd) if fd == 0u32), extra]);
+        // The last `;` may be left off.
+        assert_eq!(policy!(default allow on x86; allow getpid();), policy!(default allow on x86; allow getpid()));
+    }
+
+    #[test]
+    fn policy_errors() {
+        assert!(matches!(policy!(default errno(4096) on x86), Err(Error::Check(CheckError::InvalidErrno(_)))));
+        assert!(matches!(policy!(default allow on x86 else errno(4096)), Err(Error::Check(CheckError::InvalidErrno(_)))));
+        assert!(matches!(policy!(default allow on x86, x86), Err(Error::Check(CheckError::DuplicateArch))));
+        assert!(matches!(policy!(default allow on x86; [arm] allow getpid()), Err(Error::Check(CheckError::RuleArchNotEnabled))));
+        assert!(matches!(
+            policy!(default allow on x86; allow getpid(); errno(4096) getppid()),
+            Err(Error::Check(CheckError::InvalidErrno(_))),
+        ));
+    }
+
+    #[test]
+    fn policy_long() {
+        // A hundred rules without conditions stay under the default `recursion_limit`.
+        let policy = policy! {
+            default allow on x86_64;
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+            allow read(fd, buf, count);
+        }.unwrap();
+        assert_eq!(policy.rules.len(), 100);
     }
 }

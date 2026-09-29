@@ -20,14 +20,16 @@ By declaring rules in a similar style to [libseccomp](https://github.com/seccomp
 use seacomb::*;
 use std::io::Write;
 
-// Allow any syscall when no rule matches.
-let mut policy = Policy::new_native(Action::Allow).unwrap();
+let policy = policy! {
+    // Allow any syscall when no rule matches.
+    default allow on native;
 
-// Make write to stderr (fd 2) fail with EPERM.
-policy.add(rule!(errno(1) write(fd, buf, count) if fd == 2u32)).unwrap();
+    // Make write to stderr (fd 2) fail with EPERM.
+    errno(1) write(fd, buf, count) if fd == 2u32;
 
-// Kill the process on execve.
-policy.add(rule!(kill process execve(pathname, argv, envp))).unwrap();
+    // Kill the process on execve.
+    kill execve(pathname, argv, envp);
+}.unwrap();
 
 #[cfg(target_os = "linux")]
 {

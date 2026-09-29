@@ -22,6 +22,8 @@ pub enum BinOp { Add, Sub, And, Or, Xor }
 
 /// Arithmetic expressions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Verus does not yet model non-Copy Clone derives.
+#[verifier::external_derive(Clone)]
 pub enum Expr {
     /// A free variable.
     Var(u32),
@@ -38,6 +40,8 @@ pub enum CmpOp { Eq, Lt, Le }
 
 /// Boolean conditions.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Verus does not yet model non-Copy Clone derives.
+#[verifier::external_derive(Clone)]
 pub enum Cond {
     True, False,
     Cmp(CmpOp, Arc<Expr>, Arc<Expr>),

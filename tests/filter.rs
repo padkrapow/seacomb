@@ -12,10 +12,10 @@ fn actions() {
         (rule!(trace(u16::MAX) getpid()), Expect::Errno(libc::ENOSYS)),
         (rule!(notify getpid()), Expect::Errno(libc::ENOSYS)),
         (rule!(trap(u16::MAX) getpid()), Expect::Sigsys),
-        (rule!(kill thread getpid()), Expect::Sigsys),
-        (rule!(kill process getpid()), Expect::Sigsys),
+        (rule!(kill_thread getpid()), Expect::Sigsys),
+        (rule!(kill getpid()), Expect::Sigsys),
     ] {
-        let policy = Policy::new_native_allow(rule);
+        let policy = policy!(default allow on native; {rule}).unwrap();
         unsafe { policy.install_and_check(libc::SYS_getpid, [0; 6], expect) };
     }
 }
@@ -23,9 +23,11 @@ fn actions() {
 /// A native policy applies its default action to every syscall without a rule.
 #[test]
 fn default_action() {
-    let mut policy = Policy::new_native(Expect::DENY).unwrap();
-    policy.add(rule!(allow exit(status))).unwrap();
-    policy.add(rule!(allow exit_group(status))).unwrap();
+    let policy = policy! {
+        default {Expect::DENY} on native;
+        allow exit(status);
+        allow exit_group(status);
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_getpid, [0; 6], Expect::Denied);
         policy.install_and_check(libc::SYS_getppid, [0; 6], Expect::Denied);
@@ -35,7 +37,7 @@ fn default_action() {
 /// A rejected update leaves the rules added before it in force.
 #[test]
 fn failed_add_keeps_rules() {
-    let mut policy = Policy::new_native_allow(rule!({Expect::DENY} getpid()));
+    let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
     assert!(matches!(
         policy.add_arch(Arch::native().unwrap()),
         Err(Error::Check(CheckError::DuplicateArch))
@@ -56,14 +58,12 @@ fn failed_add_keeps_rules() {
 /// A rejected bad-architecture action leaves the one set before it in force.
 #[test]
 fn failed_bad_arch_keeps_action() {
-    let mut policy = Policy::new(Action::Allow).unwrap();
     let absent = if Arch::native().unwrap() == Arch::X86 {
         Arch::Aarch64
     } else {
         Arch::X86
     };
-    policy.add_arch(absent).unwrap();
-    policy.on_bad_arch(Action::KillProcess).unwrap();
+    let mut policy = policy!(default allow on {absent} else kill).unwrap();
     assert!(matches!(
         policy.on_bad_arch(Action::Errno(4096)),
         Err(Error::Check(CheckError::InvalidErrno(_)))
@@ -74,7 +74,7 @@ fn failed_bad_arch_keeps_action() {
 /// An argument test narrows a rule to the calls that pass it.
 #[test]
 fn arg_eq() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if fd == 42u32));
+    let policy = policy!(default allow on native; {Expect::DENY} lseek(fd, offset, whence) if fd == 42u32).unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_lseek, [42, 0, 0, 0, 0, 0], Expect::Denied);
         policy.install_and_check(libc::SYS_lseek, [43, 0, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -85,7 +85,10 @@ fn arg_eq() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn arg_high_word() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x1_0000_0000isize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} lseek(fd, offset, whence) if offset == 0x1_0000_0000isize;
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_lseek, [43, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
         policy.install_and_check(libc::SYS_lseek, [43, 1, 0, 0, 0, 0], Expect::Errno(libc::EBADF));
@@ -95,7 +98,7 @@ fn arg_high_word() {
 /// A test on a 16-bit argument ignores the register bits above it.
 #[test]
 fn narrow_arg() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} fchmod(fd, mode) if mode == 0o644u16));
+    let policy = policy!(default allow on native; {Expect::DENY} fchmod(fd, mode) if mode == 0o644u16).unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         policy.install_and_check(libc::SYS_fchmod, [fd, 0o644, 0, 0, 0, 0], Expect::Denied);
@@ -107,7 +110,7 @@ fn narrow_arg() {
 /// An ordering test on a signed argument compares it as signed.
 #[test]
 fn signed_arg() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} ftruncate(fd, length) if length < -1isize));
+    let policy = policy!(default allow on native; {Expect::DENY} ftruncate(fd, length) if length < -1isize).unwrap();
     let fd = libc::c_ulong::MAX;
     for (length, expect) in [
         (libc::c_long::MIN, Expect::Denied),
@@ -125,7 +128,9 @@ fn signed_arg() {
 fn six_conds() {
     let sig = Syscall::ProcessVmReadv.signature(Arch::native().unwrap());
     let &[t0, t1, t2, t3, t4, t5] = sig else { panic!("{sig:?}") };
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0));
+    // Inside `policy!`, this condition would pass the default `recursion_limit`.
+    let mut policy = Policy::new_native(Action::Allow).unwrap();
+    policy.add(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0)).unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_process_vm_readv, [1, 2, 3, 4, 5, 6], Expect::Denied);
         policy.install_and_check(libc::SYS_process_vm_readv, [2, 2, 3, 4, 5, 6], Expect::Errno(libc::EINVAL));
@@ -141,7 +146,11 @@ fn six_conds() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn eq_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 0x1_0000_0001usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
+            if flags == 0x1_0000_0001usize;
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 0x1_0000_0001], Expect::Denied);
         policy.install_and_check(libc::SYS_process_vm_writev, [0, 0, 0, 0, 0, 1], Expect::Errno(libc::EINVAL));
@@ -154,7 +163,10 @@ fn eq_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ne_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} munmap(addr, len) if addr != 0x1_0000_0001usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} munmap(addr, len) if addr != 0x1_0000_0001usize;
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_munmap, [0x1_0000_0001, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
         policy.install_and_check(libc::SYS_munmap, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -167,8 +179,11 @@ fn ne_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn lt_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) if len < 0x1_0000_0001usize));
-    let never = Policy::new_native_allow(rule!({Expect::DENY} msync(addr, len, flags) if len < 0usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} msync(addr, len, flags) if len < 0x1_0000_0001usize;
+    }.unwrap();
+    let never = policy!(default allow on native; {Expect::DENY} msync(addr, len, flags) if len < 0usize).unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_msync, [1, 0xffff_ffff, 0, 0, 0, 0], Expect::Denied);
         policy.install_and_check(libc::SYS_msync, [1, 0x1_0000_0000, 0, 0, 0, 0], Expect::Denied);
@@ -183,8 +198,14 @@ fn lt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn le_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) if count <= 0x1_0000_0000usize));
-    let always = Policy::new_native_allow(rule!({Expect::DENY} read(fd, buf, count) if count <= 0xffff_ffff_ffff_ffffusize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} read(fd, buf, count) if count <= 0x1_0000_0000usize;
+    }.unwrap();
+    let always = policy! {
+        default allow on native;
+        {Expect::DENY} read(fd, buf, count) if count <= 0xffff_ffff_ffff_ffffusize;
+    }.unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         policy.install_and_check(libc::SYS_read, [fd, 0, 0xffff_ffff, 0, 0, 0], Expect::Denied);
@@ -200,8 +221,14 @@ fn le_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn gt_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffffusize));
-    let never = Policy::new_native_allow(rule!({Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffff_ffff_ffffusize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffffusize;
+    }.unwrap();
+    let never = policy! {
+        default allow on native;
+        {Expect::DENY} sendfile(out_fd, in_fd, offset, count) if count > 0xffff_ffff_ffff_ffffusize;
+    }.unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         policy.install_and_check(libc::SYS_sendfile, [fd, fd, 0, 0xffff_fffe, 0, 0], Expect::Errno(libc::EBADF));
@@ -217,8 +244,14 @@ fn gt_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ge_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0x1_0000_0000usize));
-    let always = Policy::new_native_allow(rule!({Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0x1_0000_0000usize;
+    }.unwrap();
+    let always = policy! {
+        default allow on native;
+        {Expect::DENY} splice(fd_in, off_in, fd_out, off_out, len, flags) if len >= 0usize;
+    }.unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         policy.install_and_check(libc::SYS_splice, [fd, 0, fd, 0, 0xffff_ffff, 0], Expect::Errno(libc::EBADF));
@@ -234,8 +267,16 @@ fn ge_64() {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn masked_eq_64() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) if sigsetsize & 0xf0_0000_000fusize == 0xa0_0000_0005usize));
-    let high = Policy::new_native_allow(rule!({Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) if sigsetsize & 0xffff_ffff_0000_0000usize == 0x1_0000_0000usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
+            if sigsetsize & 0xf0_0000_000fusize == 0xa0_0000_0005usize;
+    }.unwrap();
+    let high = policy! {
+        default allow on native;
+        {Expect::DENY} epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
+            if sigsetsize & 0xffff_ffff_0000_0000usize == 0x1_0000_0000usize;
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xa0_0000_0005], Expect::Denied);
         policy.install_and_check(libc::SYS_epoll_pwait, [0, 0, 0, 0, 0, 0xaf_ffff_fff5], Expect::Denied);
@@ -250,7 +291,10 @@ fn masked_eq_64() {
 /// Masked equality with a zero mask matches every value.
 #[test]
 fn zero_mask() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} mprotect(addr, len, prot) if addr & 0usize == 0usize));
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} mprotect(addr, len, prot) if addr & 0usize == 0usize;
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_mprotect, [0, 0, 0, 0, 0, 0], Expect::Denied);
         policy.install_and_check(libc::SYS_mprotect, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -264,8 +308,14 @@ fn zero_mask() {
 fn unsigned_arg() {
     let sign = (1 as libc::c_ulong) << (libc::c_ulong::BITS - 1);
     let policy_sign = 1u64 << (libc::c_ulong::BITS - 1);
-    let below = Policy::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) if count < {policy_sign as usize}));
-    let above = Policy::new_native_allow(rule!({Expect::DENY} write(fd, buf, count) if count > {policy_sign as usize}));
+    let below = policy! {
+        default allow on native;
+        {Expect::DENY} write(fd, buf, count) if count < {policy_sign as usize};
+    }.unwrap();
+    let above = policy! {
+        default allow on native;
+        {Expect::DENY} write(fd, buf, count) if count > {policy_sign as usize};
+    }.unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         below.install_and_check(libc::SYS_write, [fd, 0, 0, 0, 0, 0], Expect::Denied);
@@ -291,10 +341,11 @@ fn no_arch() {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[test]
 fn x86_64_x32() {
-    let mut policy = Policy::new_native(Expect::DENY).unwrap();
-    policy.on_bad_arch(Action::Errno(libc::EPERM as u16)).unwrap();
-    policy.add(rule!(allow exit(status))).unwrap();
-    policy.add(rule!(allow exit_group(status))).unwrap();
+    let policy = policy! {
+        default {Expect::DENY} on native else errno(libc::EPERM as u16);
+        allow exit(status);
+        allow exit_group(status);
+    }.unwrap();
     let fd = libc::c_ulong::MAX;
     unsafe {
         policy.install_and_check(-1, [fd, 0, 0, 0, 0, 0], Expect::Denied);
@@ -310,8 +361,7 @@ fn x86_64_x32() {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[test]
 fn x86_64_skip() {
-    let mut policy = Policy::new_native_allow(rule!({Expect::DENY} skip()));
-    policy.on_bad_arch(Action::Errno(libc::EPERM as u16)).unwrap();
+    let policy = policy!(default allow on native else errno(libc::EPERM as u16); {Expect::DENY} skip()).unwrap();
     unsafe { policy.install_and_check(-1, [0; 6], Expect::Denied) };
 }
 
@@ -319,7 +369,7 @@ fn x86_64_skip() {
 #[cfg(target_arch = "x86")]
 #[test]
 fn x86_socketcall() {
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} socket(domain, ty, protocol)));
+    let policy = policy!(default allow on native; {Expect::DENY} socket(domain, ty, protocol)).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     let bind_args: [libc::c_ulong; 3] = [libc::c_ulong::MAX, 0, 0];
     unsafe {
@@ -333,8 +383,10 @@ fn x86_socketcall() {
 #[cfg(target_arch = "x86")]
 #[test]
 fn x86_socketcall_exact_conds() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add(rule!({Expect::DENY} exact socket(domain, ty, protocol) if domain == 1)).unwrap();
+    let policy = policy! {
+        default allow on native;
+        {Expect::DENY} exact socket(domain, ty, protocol) if domain == 1;
+    }.unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     unsafe {
         policy.install_and_check(libc::SYS_socket, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -347,8 +399,7 @@ fn x86_socketcall_exact_conds() {
 #[cfg(target_arch = "x86")]
 #[test]
 fn x86_socketcall_exact() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add(rule!({Expect::DENY} exact socket(domain, ty, protocol))).unwrap();
+    let policy = policy!(default allow on native; {Expect::DENY} exact socket(domain, ty, protocol)).unwrap();
     let socket_args: [libc::c_ulong; 3] = [0; 3];
     unsafe {
         policy.install_and_check(libc::SYS_socket, [1, 0, 0, 0, 0, 0], Expect::Denied);
@@ -362,7 +413,7 @@ fn x86_socketcall_exact() {
 fn x86_ipc() {
     // The i386 semget number in `arch/x86/entry/syscalls/syscall_32.tbl`, which `libc` does not define.
     let semget: libc::c_long = 393;
-    let policy = Policy::new_native_allow(rule!({Expect::DENY} semget(key, nsems, semflg)));
+    let policy = policy!(default allow on native; {Expect::DENY} semget(key, nsems, semflg)).unwrap();
     unsafe {
         policy.install_and_check(semget, [0; 6], Expect::Denied);
         policy.install_and_check(libc::SYS_ipc, [2, 0, 0, 0, 0, 0], Expect::Denied);
@@ -375,8 +426,7 @@ fn x86_ipc() {
 #[test]
 fn x86_ipc_exact() {
     let semget: libc::c_long = 393;
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add(rule!({Expect::DENY} exact semget(key, nsems, semflg))).unwrap();
+    let policy = policy!(default allow on native; {Expect::DENY} exact semget(key, nsems, semflg)).unwrap();
     unsafe {
         policy.install_and_check(semget, [0; 6], Expect::Denied);
         policy.install_and_check(libc::SYS_ipc, [0x1_0002, 0, 0, 0, 0, 0], Expect::Errno(libc::EINVAL));
@@ -387,9 +437,7 @@ fn x86_ipc_exact() {
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn aarch64_no_alias() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add_arch(Arch::X86_64).unwrap();
-    policy.add(rule!({Expect::DENY} open(pathname, flags, mode))).unwrap();
+    let policy = policy!(default allow on native, x86_64; {Expect::DENY} open(pathname, flags, mode)).unwrap();
     unsafe {
         // The x86_64 open number is io_submit on aarch64.
         policy.install_and_check(libc::SYS_io_submit, [0; 6], Expect::Errno(libc::EINVAL));
@@ -402,13 +450,14 @@ fn aarch64_no_alias() {
 fn rule_on_archs() {
     let native = Arch::native().unwrap();
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add_arch(other).unwrap();
-    policy.add(rule!([{other}] {Expect::DENY} getpid())).unwrap();
-    policy.add(rule!([{other}, {native}] {Expect::DENY} getppid())).unwrap();
-    policy.add(rule!({Expect::DENY} getuid())).unwrap();
-    policy.add(rule!([{other}] {Expect::DENY} exact getgid())).unwrap();
-    policy.add(rule!([{native}] {Expect::DENY} exact gettid())).unwrap();
+    let policy = policy! {
+        default allow on {native}, {other};
+        [{other}] {Expect::DENY} getpid();
+        [{other}, {native}] {Expect::DENY} getppid();
+        {Expect::DENY} getuid();
+        [{other}] {Expect::DENY} exact getgid();
+        [{native}] {Expect::DENY} exact gettid();
+    }.unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_getpid, [0; 6], Expect::Ok);
         policy.install_and_check(libc::SYS_getppid, [0; 6], Expect::Denied);
@@ -423,7 +472,7 @@ fn rule_on_archs() {
 fn rule_on_archs_checks() {
     let native = Arch::native().unwrap();
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
-    let mut policy = Policy::new_native_allow(rule!({Expect::DENY} getpid()));
+    let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
     assert!(matches!(
         policy.add(rule!([{other}] {Expect::DENY} getppid())),
         Err(Error::Check(CheckError::RuleArchNotEnabled)),
@@ -467,9 +516,7 @@ fn rule_payloads() {
         (Action::Trace(0), Action::Trace(0), Action::Trace(u16::MAX)),
         (Action::Trap(0), Action::Trap(0), Action::Trap(u16::MAX)),
     ] {
-        let mut policy = Policy::new_native(default).unwrap();
-        policy.add(rule!({same} getpid())).unwrap();
-        policy.add(rule!({different} getpid())).unwrap();
+        policy!(default {default} on native; {same} getpid(); {different} getpid()).unwrap();
     }
 }
 
@@ -483,11 +530,11 @@ fn payload_limits() {
         rule!(trace(u16::MAX) getpid()),
         rule!(trap(u16::MAX) getpid()),
     ] {
-        Policy::new_native_allow(rule);
+        policy!(default allow on native; {rule}).unwrap();
     }
     for errno in [4096, u16::MAX] {
         assert!(matches!(
-            Policy::new(Action::Errno(errno)),
+            policy!(default errno(errno) on native),
             Err(Error::Check(CheckError::InvalidErrno(_)))
         ));
     }
@@ -496,28 +543,27 @@ fn payload_limits() {
 /// Errno payloads above Linux's maximum are rejected rather than clamped.
 #[test]
 fn errno_limit() {
-    assert!(Policy::new(Action::Errno(Action::MAX_ERRNO as u16 + 1)).is_err());
-    assert!(Policy::new(Action::Errno(Action::MAX_ERRNO as u16)).is_ok());
+    assert!(policy!(default errno(Action::MAX_ERRNO as u16 + 1) on native).is_err());
+    assert!(policy!(default errno(Action::MAX_ERRNO as u16) on native).is_ok());
 }
 
 /// The same architecture twice is turned down.
 #[test]
 fn duplicate_arch() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
-    assert!(policy.add_arch(Arch::native().unwrap()).is_err());
+    assert!(policy!(default allow on native, native).is_err());
 }
 
 /// A rule that repeats the default action is allowed.
 #[test]
 fn repeat_default() {
-    assert!(Policy::new_native_with_rule(Action::Allow, rule!(allow getpid())).is_ok());
+    assert!(policy!(default allow on native; allow getpid()).is_ok());
 }
 
 /// An argument the architecture does not have is turned down.
 #[test]
 fn arg_out_of_range() {
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) if {Expr::Var(6)} == {Expr::Var(6)})),
+        policy!(default allow on native; errno(1) lseek(fd, offset, whence) if {Expr::Var(6)} == {Expr::Var(6)}),
         Err(Error::Check(CheckError::InvalidArg { given: 6, total: 3 })),
     ));
 }
@@ -525,9 +571,9 @@ fn arg_out_of_range() {
 /// A rule on `Syscall::Skip` is allowed, but not with argument tests.
 #[test]
 fn skip_rule() {
-    assert!(Policy::new_native_with_rule(Action::Allow, rule!(errno(1) skip())).is_ok());
+    assert!(policy!(default allow on native; errno(1) skip()).is_ok());
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) skip() if @0 == @0)),
+        policy!(default allow on native; errno(1) skip() if @0 == @0),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
@@ -536,7 +582,7 @@ fn skip_rule() {
 #[test]
 fn no_args() {
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) getpid() if @0 == @0)),
+        policy!(default allow on native; errno(1) getpid() if @0 == @0),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
 }
@@ -545,15 +591,15 @@ fn no_args() {
 #[test]
 fn arg_type_errors() {
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) fchmodat(dirfd, pathname, mode) if pathname < 0 as ptr)),
+        policy!(default allow on native; errno(1) fchmodat(dirfd, pathname, mode) if pathname < 0 as ptr),
         Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Lt, lhs: Ptr, rhs: Ptr, .. })),
     ));
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) if mode == 1i16)),
+        policy!(default allow on native; errno(1) fchmod(fd, mode) if mode == 1i16),
         Err(Error::Check(CheckError::CmpTypes { op: CmpOp::Eq, lhs: U(16), rhs: I(16) })),
     ));
     assert!(matches!(
-        Policy::new_native_with_rule(Action::Allow, rule!(errno(1) fchmod(fd, mode) if mode & 0x1_0000u32 == 0u16)),
+        policy!(default allow on native; errno(1) fchmod(fd, mode) if mode & 0x1_0000u32 == 0u16),
         Err(Error::Check(CheckError::BinOpTypes { op: BinOp::And, lhs: U(16), rhs: U(32), .. })),
     ));
 }
@@ -561,7 +607,7 @@ fn arg_type_errors() {
 /// A `u32` constant fits an `off_t` argument only where the word is wider than 32 bits.
 #[test]
 fn word_literal() {
-    let result = Policy::new_native_with_rule(Action::Allow, rule!(errno(1) lseek(fd, offset, whence) if offset == 1u32));
+    let result = policy!(default allow on native; errno(1) lseek(fd, offset, whence) if offset == 1u32);
     if cfg!(target_pointer_width = "64") {
         assert!(result.is_ok());
     } else {
@@ -573,7 +619,7 @@ fn word_literal() {
 #[test]
 fn errno_edges() {
     for (errno, expect) in [(0, Expect::Ok), (4094, Expect::Errno(4094)), (4095, Expect::Errno(4095))] {
-        let policy = Policy::new_native_allow(rule!(errno(errno) lseek(fd, offset, whence)));
+        let policy = policy!(default allow on native; errno(errno) lseek(fd, offset, whence)).unwrap();
         unsafe { policy.install_and_check(libc::SYS_lseek, [libc::c_ulong::MAX, 0, 0, 0, 0, 0], expect) };
     }
 }
@@ -581,7 +627,7 @@ fn errno_edges() {
 /// A chain of rules long enough to need far jumps still matches each rule and falls through past them.
 #[test]
 fn long_chain() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
+    let mut policy = policy!(default allow on native).unwrap();
     for i in 0..300 {
         policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
     }
@@ -598,7 +644,7 @@ fn long_chain() {
 /// A filter over the kernel's 4096-instruction limit is refused before anything is installed.
 #[test]
 fn too_large() {
-    let mut policy = Policy::new_native(Action::Allow).unwrap();
+    let mut policy = policy!(default allow on native).unwrap();
     for i in 0..4096 {
         policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
     }

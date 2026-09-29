@@ -45,15 +45,6 @@ impl Expect {
 
 /// Test helpers on `Policy`.
 trait PolicyExt {
-    /// Returns a native policy with default action `default` and the one rule `rule`.
-    fn new_native_with_rule(default: Action, rule: Rule) -> Result<Policy, Error>;
-
-    /// Returns a native policy that allows by default and has the one rule `rule`.
-    fn new_native_allow(rule: Rule) -> Policy;
-
-    /// Returns a policy over `archs` that allows by default, or the error adding `archs` or `rule` gave.
-    fn with_rule(archs: &[Arch], rule: Rule) -> Result<Policy, Error>;
-
     /// Runs `call`, which must leave Rust's memory alone, in a child that has this policy installed, and returns its result or the signal that killed the child.
     unsafe fn install_and_run<A: Copy>(&self, call: impl FnOnce() -> A) -> Result<A, libc::c_int>;
 
@@ -62,26 +53,6 @@ trait PolicyExt {
 }
 
 impl PolicyExt for Policy {
-    fn new_native_with_rule(default: Action, rule: Rule) -> Result<Policy, Error> {
-        let mut policy = Policy::new_native(default)?;
-        policy.add(rule)?;
-        Ok(policy)
-    }
-
-    #[track_caller]
-    fn new_native_allow(rule: Rule) -> Policy {
-        Policy::new_native_with_rule(Action::Allow, rule).unwrap()
-    }
-
-    fn with_rule(archs: &[Arch], rule: Rule) -> Result<Policy, Error> {
-        let mut policy = Policy::new(Action::Allow)?;
-        for &arch in archs {
-            policy.add_arch(arch)?;
-        }
-        policy.add(rule)?;
-        Ok(policy)
-    }
-
     unsafe fn install_and_run<A: Copy>(&self, call: impl FnOnce() -> A) -> Result<A, libc::c_int> {
         // The child hands back its result through shared memory, since the filter may deny any syscall to do it with.
         let size = std::mem::size_of::<A>().max(1);
