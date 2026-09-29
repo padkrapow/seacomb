@@ -45,7 +45,7 @@ Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-
 
 ## What has been formally verified
 
-`seacomb` is developed using [Verus](https://github.com/verus-lang/verus),
+`seacomb` is written in pure Rust and verified using [Verus](https://github.com/verus-lang/verus),
 an automated program verifier for Rust.
 
 To verify the proofs, [install Verus](https://github.com/verus-lang/verus/blob/main/INSTALL.md),
