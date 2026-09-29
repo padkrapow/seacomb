@@ -5,6 +5,24 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-29
+
+### Added
+
+- Rule conditions are now a typed expression language (`Cond`, `Expr`).
+- New macros `policy!`, `rule!`, `cond!`, and `expr!` to construct policies.
+- Expression are now type-checked against each syscall's C-level signature
+  to avoid surprising bypasses.
+
+### Changed
+
+- API changes:
+  - `Filter` is removed; use `Policy` and `Policy::add(Rule)` instead.
+  - `ArgCmp` is replaced by `Cond`.
+  - Install options move to `InstallFlags` and `Policy::install_with_flags`.
+  - Validation errors move to the new `CheckError`.
+  - cBPF types move to the `cbpf` module.
+
 ## [0.2.0] - 2026-09-24
 
 ### Changed
@@ -38,6 +56,7 @@ All notable changes to this crate are documented here. The format follows
 
 - Initial release of seacomb.
 
-[Unreleased]: https://github.com/thai-terrace/seacomb/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/thai-terrace/seacomb/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/thai-terrace/seacomb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/thai-terrace/seacomb/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/thai-terrace/seacomb/releases/tag/v0.1.0
