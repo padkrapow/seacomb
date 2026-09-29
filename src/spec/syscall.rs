@@ -125,6 +125,13 @@ syscalls! {
     /// (x86's [`ia32_*` wrappers](https://github.com/torvalds/linux/blob/v7.0/arch/x86/kernel/sys_ia32.c) and `SC_ARG64`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
     pub enum Syscall {
+        // A special syscall to indicate it has been skipped.
+        #[name("skip")]
+        #[on(X86, -1)]
+        #[on(X86_64, -1)]
+        #[on(Arm, -1)]
+        #[on(Aarch64, -1)]
+        Skip,
         #[name("accept")]
         #[on(X86_64, 43, I(32), Ptr, Ptr)]
         #[on(Arm, 285, I(32), Ptr, Ptr)]
@@ -2698,13 +2705,6 @@ syscalls! {
         #[on(Arm, 146, UWord, Ptr, UWord)]
         #[on(Aarch64, 66, UWord, Ptr, UWord)]
         Writev,
-        // A special syscall to indicate it has been skipped.
-        #[name("skip")]
-        #[on(X86, -1)]
-        #[on(X86_64, -1)]
-        #[on(Arm, -1)]
-        #[on(Aarch64, -1)]
-        Skip,
     }
 }
 

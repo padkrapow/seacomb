@@ -176,17 +176,17 @@ verus! {
 
 impl Expr {
     /// Denotes the expression as an integer in the range of its type.
-    pub open spec fn eval(self, arch: Arch, ctx: Seq<PrimType>, args: Seq<u64>) -> int
+    pub open spec fn eval(self, arch: Arch, ctx: Seq<PrimType>, vars: Seq<u64>) -> int
         decreases self
     {
         match self {
-            Expr::Var(i) => ctx[i as int].to_int(arch, args[i as int]),
+            Expr::Var(i) => ctx[i as int].to_int(arch, vars[i as int]),
             Expr::Lit(c, cty) => cty.trunc(arch, c as int),
-            Expr::Cast(e, cty) => cty.trunc(arch, e.eval(arch, ctx, args)),
+            Expr::Cast(e, cty) => cty.trunc(arch, e.eval(arch, ctx, vars)),
             Expr::BinOp(op, e1, e2) => {
                 let ty = choose |ty: PrimType| self.of_type(arch, ctx, ty);
-                let v1 = e1.eval(arch, ctx, args);
-                let v2 = e2.eval(arch, ctx, args);
+                let v1 = e1.eval(arch, ctx, vars);
+                let v2 = e2.eval(arch, ctx, vars);
                 match op {
                     BinOp::Add => ty.trunc(arch, v1 + v2),
                     BinOp::Sub => ty.trunc(arch, v1 - v2),
@@ -201,24 +201,24 @@ impl Expr {
 
 impl Cond {
     /// Whether the condition holds.
-    pub open spec fn eval(self, arch: Arch, ctx: Seq<PrimType>, args: Seq<u64>) -> bool
+    pub open spec fn eval(self, arch: Arch, ctx: Seq<PrimType>, vars: Seq<u64>) -> bool
         decreases self
     {
         match self {
             Cond::True => true,
             Cond::False => false,
             Cond::Cmp(op, e1, e2) => {
-                let v1 = e1.eval(arch, ctx, args);
-                let v2 = e2.eval(arch, ctx, args);
+                let v1 = e1.eval(arch, ctx, vars);
+                let v2 = e2.eval(arch, ctx, vars);
                 match op {
                     CmpOp::Eq => v1 == v2,
                     CmpOp::Lt => v1 < v2,
                     CmpOp::Le => v1 <= v2,
                 }
             }
-            Cond::And(c1, c2) => c1.eval(arch, ctx, args) && c2.eval(arch, ctx, args),
-            Cond::Or(c1, c2) => c1.eval(arch, ctx, args) || c2.eval(arch, ctx, args),
-            Cond::Not(c) => !c.eval(arch, ctx, args),
+            Cond::And(c1, c2) => c1.eval(arch, ctx, vars) && c2.eval(arch, ctx, vars),
+            Cond::Or(c1, c2) => c1.eval(arch, ctx, vars) || c2.eval(arch, ctx, vars),
+            Cond::Not(c) => !c.eval(arch, ctx, vars),
         }
     }
 }
