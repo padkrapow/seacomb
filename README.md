@@ -13,9 +13,8 @@ and [Docker](https://docs.docker.com/engine/security/seccomp/)
 and [systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#SystemCallFilter=)
 use it to restrict containers and services.
 
-By declaring rules in a similar style to [libseccomp](https://github.com/seccomp/libseccomp),
-`seacomb` compiles and registers these rules using a *formally verified* compiler to cBPF.
-
+In `seacomb`, you can write seccomp policies as readable, type-checked rules, and a *formally verified*
+compiler turns them into a cBPF filter that provably does exactly what you wrote.
 ```rust
 use seacomb::*;
 use std::io::Write;
@@ -33,6 +32,7 @@ let policy = policy! {
 
 #[cfg(target_os = "linux")]
 {
+    // Compile and install the policy.
     policy.install().unwrap();
 
     assert!(std::io::stdout().write_all(b"Hello from stdout!\n").is_ok());
@@ -41,7 +41,7 @@ let policy = policy! {
 }
 ```
 
-Supported architectures: x86, x86-64, 32-bit ARM (little-endian), and AArch64.
+Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-endian), and AArch64.
 
 ## What has been formally verified
 
