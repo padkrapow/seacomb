@@ -19,6 +19,7 @@ use machine::Regs;
 
 verus! {
 
+/// Possible errors when compiling a policy to cBPF.
 #[verifier::external_derive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

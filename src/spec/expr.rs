@@ -7,7 +7,7 @@ use super::policy::Arch;
 // Syntax
 verus! {
 
-/// Primitive types.
+/// Primitive types in the policy language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum PrimType {
     I(u32),
@@ -17,10 +17,11 @@ pub enum PrimType {
     Ptr,
 }
 
+/// A binary operator in the policy language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum BinOp { Add, Sub, And, Or, Xor }
 
-/// Arithmetic expressions.
+/// Arithmetic expressions in the policy language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
 #[verifier::external_derive(Clone)]
@@ -35,10 +36,11 @@ pub enum Expr {
     BinOp(BinOp, Arc<Expr>, Arc<Expr>),
 }
 
+/// A comparison operator in the policy language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum CmpOp { Eq, Lt, Le }
 
-/// Boolean conditions.
+/// Boolean expressions in the policy language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
 #[verifier::external_derive(Clone)]

@@ -36,7 +36,7 @@ macro_rules! syscalls {
                     }
                 }
 
-                /// Executable version of [`Self::spec_nr`].
+                /// Executable version of `Self::spec_nr`.
                 #[allow(unreachable_patterns)]
                 #[verifier::when_used_as_spec(spec_nr)]
                 pub fn nr(&self, arch: super::policy::Arch) -> (res: Option<i32>)
@@ -67,7 +67,7 @@ macro_rules! syscalls {
                     }
                 }
 
-                /// Executable version of [`Self::spec_signature`].
+                /// Executable version of `Self::spec_signature`.
                 #[allow(unreachable_patterns)]
                 pub fn signature(&self, arch: super::policy::Arch) -> (res: &'static [PrimType])
                     ensures res@ =~= self.spec_signature(arch)
@@ -109,7 +109,7 @@ macro_rules! syscalls {
 }
 
 syscalls! {
-    /// Linux syscall identifiers, extracted from Linux v7.0.
+    /// All syscall identifiers from Linux v7.0.
     ///
     /// Syscall numbers:
     /// [x86](https://github.com/torvalds/linux/blob/v7.0/arch/x86/entry/syscalls/syscall_32.tbl),
@@ -124,6 +124,7 @@ syscalls! {
     /// with 64-bit arguments unsplit
     /// (x86's [`ia32_*` wrappers](https://github.com/torvalds/linux/blob/v7.0/arch/x86/kernel/sys_ia32.c) and `SC_ARG64`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
+    #[non_exhaustive]
     pub enum Syscall {
         // A special syscall to indicate it has been skipped.
         #[name("skip")]

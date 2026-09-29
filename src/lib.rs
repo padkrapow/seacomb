@@ -20,12 +20,13 @@ use vstd::prelude::*;
 
 pub use crate::compiler::CompileError;
 pub use crate::check::CheckError;
-pub use crate::spec::{policy::*, syscall::*, cbpf::*, expr::*};
+pub use crate::spec::{policy::*, syscall::*, expr::*};
+pub use crate::spec::cbpf;
 pub use crate::macros::{ToExpr, ToCond};
 
 verus! {
 
-/// An error while creating, updating, compiling, or installing a policy.
+/// All possible errors when creating or using policies.
 #[verifier::external_derive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -228,8 +229,9 @@ impl Error {
     }
 }
 
-/// Options for installing a policy, named after libseccomp's `SCMP_FLTATR_CTL_*` attributes.
+/// Options for installing a policy, named after libseccomp's `SCMP_FLTATR_CTL_*` flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InstallFlags {
     /// Set `no_new_privs` before installing the filter.
     pub ctl_nnp: bool,

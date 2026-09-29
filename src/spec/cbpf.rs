@@ -1,28 +1,31 @@
 //! Abstract syntax and semantics of a subset of cBPF accepted by seccomp.
-
 use vstd::prelude::*;
 
 // Syntax
 verus! {
 
+/// Operand for some cBPF instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum Src { K(u32), X }
 
+/// Return constant or register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum RetVal { K(u32), A }
 
+/// Supported ALU ops in a cBPF program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum AluOp {
     Add = 0x00, Sub = 0x10, Mul = 0x20, Div = 0x30, Or = 0x40,
     And = 0x50, Lsh = 0x60, Rsh = 0x70, Xor = 0xa0,
 }
 
-/// Comparison of a conditional jump (`BPF_OP` of class `BPF_JMP`, except `BPF_JA`).
+/// Comparison operator of a conditional jump in cBPF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum JmpOp { Eq = 0x10, Gt = 0x20, Ge = 0x30, Set = 0x40 }
 
-/// `struct sock_filter`, restricted to instructions accepted by `seccomp_check_filter()`:
-/// <https://github.com/torvalds/linux/blob/40288c9206c17eb66a603262e06a58d300d0f279/kernel/seccomp.c#L286-L343>
+/// An abstract representation of cBPF instructions,
+/// restricted to the instructions accepted by
+/// [`seccomp_check_filter()`](https://github.com/torvalds/linux/blob/40288c9206c17eb66a603262e06a58d300d0f279/kernel/seccomp.c#L286-L343).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum Instr {
     /// `BPF_LD | BPF_W | BPF_ABS`: `A = *(u32 *)((char *)&data + k)`.
@@ -59,7 +62,7 @@ pub enum Instr {
     Txa,
 }
 
-/// `struct sock_fprog`.
+/// An abstract representation of a cBPF program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
 #[verifier::external_derive(Clone)]
@@ -91,7 +94,7 @@ impl Instr {
 
 impl Program {
     /// `BPF_MEMWORDS` in `linux/bpf_common.h`.
-    pub const MEM_WORDS: u32 = 16;
+    pub spec const MEM_WORDS: u32 = 16;
 
     /// Structural instruction validity, without input-buffer bounds, Linux installation
     /// limits, or scratch-memory initialization analysis.
@@ -107,12 +110,14 @@ impl Program {
 // Semantics
 verus! {
 
+/// Final result of executing a cBPF program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
 pub enum Outcome {
     Return(u32),
     RuntimeError,
 }
 
+/// Abstract cBPF machine state used in proofs.
 pub struct MachineState {
     pub pc: nat,
     pub a: u32,
