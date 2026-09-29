@@ -48,6 +48,13 @@ Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-
 `seacomb` is developed using [Verus](https://github.com/verus-lang/verus),
 an automated program verifier for Rust.
 
+To verify the proofs, [install Verus](https://github.com/verus-lang/verus/blob/main/INSTALL.md),
+and run:
+```sh
+cargo verus verify
+```
+Without verification, this crate is also completely compatible with `cargo`.
+
 Formally verified properties:
 - **Compiler correctness:** `seacomb`'s policy compiler always produces cBPF filters equivalent to the source policy, relative to the formal semantics of policies and cBPF in `src/spec`.
   This rules out miscompilations like these in libseccomp:
@@ -63,21 +70,21 @@ Formally verified properties:
 - **Chaining:** Installing multiple policies is equivalent to evaluating them
   in order, verified against the kernel's precedence and tie-breaking rules.
 
-To verify the proofs, [install Verus](https://github.com/verus-lang/verus/blob/main/INSTALL.md),
-and run:
-```sh
-cargo verus verify
-```
-Without verification, this crate is also completely compatible with `cargo`.
+Futhermore, in `seacomb`'s policy language, rule conditions are type-checked against
+each syscall's C signature, and the compiler correctness theorem implies that compiled filters
+ignore unused high bits.
+This prevents bypasses where a filter compared all 64 bits of a 32-bit argument:
+- [CVE-2019-10063](https://nvd.nist.gov/vuln/detail/CVE-2019-10063) in Flatpak (CVSS 9.0 critical).
+- [CVE-2019-7303](https://nvd.nist.gov/vuln/detail/CVE-2019-7303) in snapd (CVSS 7.5 high).
 
 ## Testing
 
 QEMU is a prerequisite for testing (install with, e.g., `brew install qemu`).
 
-To run all tests on all supported architectures, or on one:
+To run all tests:
 ```sh
 python3 tests/run.py
-python3 tests/run.py aarch64
+python3 tests/run.py aarch64 # Only run for aarch64
 ```
 
 ## Trusted computing base and how AI agents are involved

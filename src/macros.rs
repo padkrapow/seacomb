@@ -39,6 +39,21 @@ impl ToCond for Arc<Cond> { fn to_cond(self) -> Arc<Cond> { self } }
 } // verus!
 
 /// Parses a Rust-like expression into an `Expr`.
+///
+/// ```
+/// use seacomb::*;
+///
+/// // `@n` is the syscall argument at position `n`.
+/// expr!(@0 + 1u32);
+/// expr!(@1 & 0o777 | 0o644);
+/// expr!(-1i64 - @2);
+///
+/// // `as` for bitcasting, and `{..}` embeds a Rust `ToExpr` value.
+/// let mask: u32 = 0xff;
+/// expr!((@1 as u32) & {mask});
+/// expr!(@2 as ptr);
+/// expr!({u16::MAX} as usize + @3);
+/// ```
 #[macro_export]
 macro_rules! expr {
     // or := xor ('|' xor)*
@@ -124,6 +139,20 @@ macro_rules! expr {
 }
 
 /// Parses a Rust-like expression into a `Cond`.
+///
+/// ```
+/// use seacomb::*;
+///
+/// // Comparisons.
+/// cond!(@0 == 2);
+/// cond!(@1 & 0x80000u32 != 0u32);
+/// cond!(@2 >= 4096usize);
+///
+/// // Logical connectives, and `{..}` embeds a Rust `ToCond` value.
+/// let stdin = cond!(@0 == 0);
+/// cond!(!{&stdin} && (@2 < 4096usize || true));
+/// cond!({stdin} || false);
+/// ```
 #[macro_export]
 macro_rules! cond {
     // or := and ('||' and)*
@@ -186,6 +215,22 @@ macro_rules! cond {
 }
 
 /// Parses a rule into a `Rule`.
+///
+/// ```
+/// use seacomb::*;
+///
+/// // Unconditional rules.
+/// rule!(kill execve(_, _, _));
+/// rule!(trap(7) getpid());
+///
+/// // Conditional rules.
+/// rule!(errno(1) write(fd, _, count) if fd == 2u32 && count > 0usize);
+/// rule!(log openat(_, _, flags) if flags & 0o100 != 0);
+///
+/// // `[..]` limits a rule to some archs, and `exact` skips the x86 `socketcall` form.
+/// rule!([x86] allow exact bind(fd, addr, len));
+/// rule!([x86_64, aarch64] notify ptrace());
+/// ```
 #[macro_export]
 macro_rules! rule {
     // rule    := ['[' arch (',' arch)* ']'] action ['exact'] syscall '(' names ')' ['if' cond]
@@ -268,6 +313,82 @@ macro_rules! rule {
     ($($rest:tt)*) => { $crate::rule!(@act [] $($rest)*) };
 }
 
+/// Parses a policy into a `Result<Policy, Error>`.
+///
+/// ```
+/// use seacomb::*;
+///
+/// // Allow by default on x86-64 and AArch64, and kill the process on any other arch.
+/// policy! {
+///     default allow on x86_64, aarch64 else kill;
+///     errno(1) write(fd, _, _) if fd == 2u32;
+///     kill execve(_, _, _);
+/// }.unwrap();
+///
+/// // `native` is the current host at build time, and `{..}` embeds a Rust `Rule`.
+/// let no_ptrace = rule!(errno(1) ptrace(_, _, _, _));
+/// policy!(default allow on native; {no_ptrace}).unwrap();
+/// policy!(default errno(38) on native; allow read(); allow write(); allow exit_group()).unwrap();
+///
+/// // Type checking: `buf` has type `ptr`, so it cannot be compared to `usize`.
+/// policy!(default allow on x86_64; allow write(_, buf, _) if buf < 4096usize).unwrap_err();
+/// ```
+#[macro_export]
+macro_rules! policy {
+    // policy := header ';' (rule ';')*, where the last ';' may be left off
+    // header := 'default' action 'on' arch (',' arch)* ['else' action]
+    // arch   := native | rule's arch
+    // rule   := rule's rule | '{' rust-expr '}'
+
+    // Takes up to four tokens a step to find each `;`, which keeps long policies under the default `recursion_limit`.
+    (@split [$($done:tt)*] [$($cur:tt)*] ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)*]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a $b]] [] $($rest)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt $c:tt ; $($rest:tt)*) =>
+        { $crate::policy!(@split [$($done)* [$($cur)* $a $b $c]] [] $($rest)*) };
+    (@split $done:tt [$($cur:tt)*] $a:tt $b:tt $c:tt $d:tt $($rest:tt)*) =>
+        { $crate::policy!(@split $done [$($cur)* $a $b $c $d] $($rest)*) };
+    (@split [$($done:tt)*] []) => { $crate::policy!(@mk $($done)*) };
+    (@split [$($done:tt)*] [$($cur:tt)*] $($rest:tt)*) => { $crate::policy!(@mk $($done)* [$($cur)* $($rest)*]) };
+
+    // Runs in a closure, so a failed step returns its error.
+    (@mk [$($header:tt)*] $([$($rule:tt)*])*) => {
+        (|| -> ::core::result::Result<$crate::Policy, $crate::Error> {
+            #[allow(unused_mut)]
+            let mut policy = $crate::policy!(@header $($header)*);
+            $( policy.add($crate::policy!(@rule $($rule)*))?; )*
+            ::core::result::Result::Ok(policy)
+        })()
+    };
+    (@mk) => { compile_error!("`policy!` wants a `default` header") };
+
+    (@header default $a:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
+        { $crate::policy!(@new [$a] [$($arch),+] $([$($bad)+])?) };
+    (@header default $a:tt $b:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
+        { $crate::policy!(@new [$a $b] [$($arch),+] $([$($bad)+])?) };
+    (@header $($t:tt)*) =>
+        { compile_error!(concat!("expected `default <action> on <archs>`, found `", stringify!($($t)*), "`")) };
+
+    // Without `else`, the bad-arch action stays the one `Policy::new` picks.
+    (@new [$($act:tt)+] [$($arch:tt),+] $([$($bad:tt)+])?) => {{
+        let mut policy = $crate::Policy::new($crate::rule!(@action $($act)+))?;
+        $( policy.add_arch($crate::policy!(@arch $arch))?; )+
+        $( policy.on_bad_arch($crate::rule!(@action $($bad)+))?; )?
+        policy
+    }};
+
+    (@arch native) => { $crate::Arch::native()? };
+    (@arch $a:tt) => { $crate::rule!(@arch $a) };
+
+    (@rule { $r:expr }) => { $r };
+    (@rule $($t:tt)*) => { $crate::rule!($($t)*) };
+
+    ($($t:tt)*) => { $crate::policy!(@split [] [] $($t)*) };
+}
+
 /// Cases that `rule!` should reject.
 ///
 /// ```compile_fail
@@ -326,63 +447,6 @@ macro_rules! rule {
 /// ```
 #[cfg(doctest)]
 struct RuleMacroTests;
-
-/// Parses a policy into a `Result<Policy, Error>`.
-#[macro_export]
-macro_rules! policy {
-    // policy := header ';' (rule ';')*, where the last ';' may be left off
-    // header := 'default' action 'on' arch (',' arch)* ['else' action]
-    // arch   := native | rule's arch
-    // rule   := rule's rule | '{' rust-expr '}'
-
-    // Takes up to four tokens a step to find each `;`, which keeps long policies under the default `recursion_limit`.
-    (@split [$($done:tt)*] [$($cur:tt)*] ; $($rest:tt)*) =>
-        { $crate::policy!(@split [$($done)* [$($cur)*]] [] $($rest)*) };
-    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt ; $($rest:tt)*) =>
-        { $crate::policy!(@split [$($done)* [$($cur)* $a]] [] $($rest)*) };
-    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt ; $($rest:tt)*) =>
-        { $crate::policy!(@split [$($done)* [$($cur)* $a $b]] [] $($rest)*) };
-    (@split [$($done:tt)*] [$($cur:tt)*] $a:tt $b:tt $c:tt ; $($rest:tt)*) =>
-        { $crate::policy!(@split [$($done)* [$($cur)* $a $b $c]] [] $($rest)*) };
-    (@split $done:tt [$($cur:tt)*] $a:tt $b:tt $c:tt $d:tt $($rest:tt)*) =>
-        { $crate::policy!(@split $done [$($cur)* $a $b $c $d] $($rest)*) };
-    (@split [$($done:tt)*] []) => { $crate::policy!(@mk $($done)*) };
-    (@split [$($done:tt)*] [$($cur:tt)*] $($rest:tt)*) => { $crate::policy!(@mk $($done)* [$($cur)* $($rest)*]) };
-
-    // Runs in a closure, so a failed step returns its error.
-    (@mk [$($header:tt)*] $([$($rule:tt)*])*) => {
-        (|| -> ::core::result::Result<$crate::Policy, $crate::Error> {
-            #[allow(unused_mut)]
-            let mut policy = $crate::policy!(@header $($header)*);
-            $( policy.add($crate::policy!(@rule $($rule)*))?; )*
-            ::core::result::Result::Ok(policy)
-        })()
-    };
-    (@mk) => { compile_error!("`policy!` wants a `default` header") };
-
-    (@header default $a:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
-        { $crate::policy!(@new [$a] [$($arch),+] $([$($bad)+])?) };
-    (@header default $a:tt $b:tt on $($arch:tt),+ $(else $($bad:tt)+)?) =>
-        { $crate::policy!(@new [$a $b] [$($arch),+] $([$($bad)+])?) };
-    (@header $($t:tt)*) =>
-        { compile_error!(concat!("expected `default <action> on <archs>`, found `", stringify!($($t)*), "`")) };
-
-    // Without `else`, the bad-arch action stays the one `Policy::new` picks.
-    (@new [$($act:tt)+] [$($arch:tt),+] $([$($bad:tt)+])?) => {{
-        let mut policy = $crate::Policy::new($crate::rule!(@action $($act)+))?;
-        $( policy.add_arch($crate::policy!(@arch $arch))?; )+
-        $( policy.on_bad_arch($crate::rule!(@action $($bad)+))?; )?
-        policy
-    }};
-
-    (@arch native) => { $crate::Arch::native()? };
-    (@arch $a:tt) => { $crate::rule!(@arch $a) };
-
-    (@rule { $r:expr }) => { $r };
-    (@rule $($t:tt)*) => { $crate::rule!($($t)*) };
-
-    ($($t:tt)*) => { $crate::policy!(@split [] [] $($t)*) };
-}
 
 /// Cases that `policy!` should reject.
 ///
