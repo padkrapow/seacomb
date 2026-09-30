@@ -12,6 +12,7 @@
 mod asm;
 mod check;
 mod compiler;
+mod display;
 mod macros;
 mod spec;
 pub mod prop;

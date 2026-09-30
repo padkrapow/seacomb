@@ -5,6 +5,10 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Display` impls for various types in the policy AST.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added

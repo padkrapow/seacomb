@@ -86,19 +86,26 @@ macro_rules! syscalls {
         }
 
         impl $name {
-            /// Finds the syscall with the given name, like `"exit_group"`.
+            /// Returns the syscall's name.
+            pub(crate) const fn name(&self) -> &'static str {
+                match self {
+                    $( $name::$variant => $sname, )*
+                }
+            }
+
+            /// Finds the syscall with the given name.
             pub const fn lookup(name: &str) -> Option<$name> {
-                let names: &[(&str, $name)] = &[ $( ($sname, $name::$variant), )* ];
+                const NAMES: &'static [(&'static str, $name)] = &[ $( ($sname, $name::$variant), )* ];
                 let name = name.as_bytes();
                 let mut i = 0;
-                while i < names.len() {
-                    let cand = names[i].0.as_bytes();
+                while i < NAMES.len() {
+                    let cand = NAMES[i].0.as_bytes();
                     let mut j = 0;
                     while j < name.len() && j < cand.len() && name[j] == cand[j] {
                         j += 1;
                     }
                     if j == name.len() && j == cand.len() {
-                        return Some(names[i].1);
+                        return Some(NAMES[i].1);
                     }
                     i += 1;
                 }

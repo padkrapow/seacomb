@@ -366,37 +366,3 @@ impl Policy {
 }
 
 } // verus!
-
-impl std::fmt::Display for PrimType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PrimType::I(n) => write!(f, "i{n}"),
-            PrimType::U(n) => write!(f, "u{n}"),
-            PrimType::IWord => write!(f, "isize"),
-            PrimType::UWord => write!(f, "usize"),
-            PrimType::Ptr => write!(f, "ptr"),
-        }
-    }
-}
-
-impl std::fmt::Display for CmpOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            CmpOp::Eq => "Equality",
-            CmpOp::Lt => "Less-than",
-            CmpOp::Le => "Less-or-equal",
-        })
-    }
-}
-
-impl std::fmt::Display for BinOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            BinOp::Add => "Addition",
-            BinOp::Sub => "Subtraction",
-            BinOp::And => "Bitwise and",
-            BinOp::Or => "Bitwise or",
-            BinOp::Xor => "Bitwise xor",
-        })
-    }
-}
