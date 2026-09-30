@@ -6,10 +6,10 @@ use super::policy::*;
 
 verus! {
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Whether a chain of well-formed policies produces `act` on `ev`.
     /// Policies are in installation order.
-    pub open spec fn eval_chain(policies: Seq<Policy>, ev: Event, act: Action) -> bool {
+    pub open spec fn eval_chain(policies: Seq<Self>, ev: Event, act: Action) -> bool {
         ||| policies.len() == 0 && act == Action::Allow
         ||| exists |i: int| {
             &&& 0 <= i < policies.len()

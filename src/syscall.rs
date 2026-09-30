@@ -1,52 +1,75 @@
 use vstd::prelude::*;
-use super::expr::PrimType;
- 
+use std::sync::Arc;
+use crate::spec::expr::{BinOp, CmpOp, Cond, Expr, PrimType};
+use crate::spec::policy::Arch;
+
 verus! {
 
-/// A helper macro to define the `Syscall` enum and its `Syscall::nr`,
-/// `Syscall::signature`, and `Syscall::lookup` functions.
-macro_rules! syscalls {
+impl Cond {
+    /// The multiplexer condition `@n & mask == val`, with both literals of type `ty`.
+    pub open spec fn spec_masked(n: u32, mask: i64, val: i64, ty: PrimType) -> Cond {
+        Cond::Cmp(CmpOp::Eq,
+            Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
+            Arc::new(Expr::Lit(val, ty)))
+    }
+
+    /// Executable version of `Cond::spec_masked`.
+    pub fn masked(n: u32, mask: i64, val: i64, ty: PrimType) -> (res: Cond)
+        ensures res == Cond::spec_masked(n, mask, val, ty)
+    {
+        Cond::Cmp(CmpOp::Eq,
+            Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
+            Arc::new(Expr::Lit(val, ty)))
+    }
+
+    /// A masked condition is well-formed when argument `n` has a non-pointer type.
+    pub proof fn lemma_masked_wf(arch: Arch, sig: Seq<PrimType>, n: u32, mask: i64, val: i64)
+        requires n < sig.len(), sig[n as int].wf(), sig[n as int] != PrimType::Ptr
+        ensures Cond::spec_masked(n, mask, val, sig[n as int]).wf(arch, sig)
+    {
+        let ty = sig[n as int];
+        let e = Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)));
+        assert(Expr::Var(n).of_type(arch, sig, ty));
+        assert(Expr::Lit(mask, ty).of_type(arch, sig, ty));
+        assert(ty.subtype_of(arch, ty));
+        assert(e.of_type(arch, sig, ty));
+        assert(Expr::Lit(val, ty).of_type(arch, sig, ty));
+    }
+}
+
+} // verus!
+
+/// Defines a syscall enum and its `Syscall` impl from `#[name]`, `#[on]`, and `#[mux]` annotations.
+///
+/// A `#[mux]` condition has the form `@n & mask == val`, with both literals typed as argument
+/// `n` of the multiplexer.
+#[macro_export]
+macro_rules! impl_syscall {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {
             $(
                 #[name($sname:literal)]
                 $( #[on($arch:ident, $nr:expr $(, $ty:ident $(($width:literal))?)*)] )*
+                $( #[mux($march:ident, $mux:ident, @ $n:literal & $mask:literal == $val:literal)] )*
                 $variant:ident
             ),* $(,)?
         }
     ) => {
-        verus! {
+        ::vstd::prelude::verus! {
             $(#[$meta])*
             $vis enum $name {
                 $( $variant, )*
             }
 
-            impl $name {
+            impl $crate::Syscall for $name {
                 #[allow(unreachable_patterns)]
                 #[verifier::opaque]
-                pub open spec fn spec_nr(&self, arch: super::policy::Arch) -> Option<i32> {
+                open spec fn spec_nr(self, arch: $crate::Arch) -> Option<i32> {
                     match self {
                         $(
                             $name::$variant => match arch {
-                                $( super::policy::Arch::$arch => Some(($nr) as i32), )*
-                                _ => None,
-                            },
-                        )*
-                    }
-                }
-
-                /// Executable version of `Self::spec_nr`.
-                #[allow(unreachable_patterns)]
-                #[verifier::when_used_as_spec(spec_nr)]
-                pub fn nr(&self, arch: super::policy::Arch) -> (res: Option<i32>)
-                    ensures res == self.spec_nr(arch)
-                {
-                    reveal($name::spec_nr);
-                    match self {
-                        $(
-                            $name::$variant => match arch {
-                                $( super::policy::Arch::$arch => Some(($nr) as i32), )*
+                                $( $crate::Arch::$arch => Some(($nr) as i32), )*
                                 _ => None,
                             },
                         )*
@@ -56,28 +79,89 @@ macro_rules! syscalls {
                 /// Argument types on `arch`, empty if the syscall does not exist there.
                 #[allow(unreachable_patterns)]
                 #[verifier::opaque]
-                pub open spec fn spec_signature(&self, arch: super::policy::Arch) -> Seq<PrimType> {
+                open spec fn spec_signature(self, arch: $crate::Arch) -> ::vstd::prelude::Seq<$crate::PrimType> {
                     match self {
                         $(
                             $name::$variant => match arch {
-                                $( super::policy::Arch::$arch => seq![$( PrimType::$ty $(($width))? ),*], )*
-                                _ => Seq::empty(),
+                                $( $crate::Arch::$arch => ::vstd::prelude::seq![$( $crate::PrimType::$ty $(($width))? ),*], )*
+                                _ => ::vstd::prelude::Seq::empty(),
                             },
                         )*
                     }
                 }
 
-                /// Executable version of `Self::spec_signature`.
                 #[allow(unreachable_patterns)]
-                pub fn signature(&self, arch: super::policy::Arch) -> (res: &'static [PrimType])
-                    ensures res@ =~= self.spec_signature(arch)
-                {
-                    reveal(Syscall::spec_signature);
+                #[verifier::opaque]
+                open spec fn spec_mux(self, arch: $crate::Arch) -> Option<(Self, $crate::Cond)> {
                     match self {
                         $(
                             $name::$variant => match arch {
-                                $( super::policy::Arch::$arch => &[$( PrimType::$ty $(($width))? ),*], )*
+                                $( $crate::Arch::$march => Some(($name::$mux, $crate::Cond::spec_masked($n, $mask, $val,
+                                    $crate::Syscall::spec_signature($name::$mux, arch)[$n]))), )*
+                                _ => None,
+                            },
+                        )*
+                    }
+                }
+
+                #[allow(unreachable_patterns)]
+                fn nr(self, arch: $crate::Arch) -> (res: Option<i32>) {
+                    reveal(<$name as $crate::Syscall>::spec_nr);
+                    match self {
+                        $(
+                            $name::$variant => match arch {
+                                $( $crate::Arch::$arch => Some(($nr) as i32), )*
+                                _ => None,
+                            },
+                        )*
+                    }
+                }
+
+                #[allow(unreachable_patterns)]
+                fn signature(self, arch: $crate::Arch) -> (res: &'static [$crate::PrimType]) {
+                    reveal(<$name as $crate::Syscall>::spec_signature);
+                    match self {
+                        $(
+                            $name::$variant => match arch {
+                                $( $crate::Arch::$arch => &[$( $crate::PrimType::$ty $(($width))? ),*], )*
                                 _ => &[],
+                            },
+                        )*
+                    }
+                }
+
+                #[verifier::external_body]
+                fn lookup(name: &str) -> Option<Self> {
+                    $name::lookup(name)
+                }
+
+                #[allow(unreachable_patterns)]
+                fn mux(self, arch: $crate::Arch) -> (res: Option<(Self, $crate::Cond)>) {
+                    reveal(<$name as $crate::Syscall>::spec_mux);
+                    reveal(<$name as $crate::Syscall>::spec_signature);
+                    match self {
+                        $(
+                            $name::$variant => match arch {
+                                $( $crate::Arch::$march => {
+                                    let sig = $crate::Syscall::signature($name::$mux, arch);
+                                    Some(($name::$mux, $crate::Cond::masked($n, $mask, $val, sig[$n])))
+                                }, )*
+                                _ => None,
+                            },
+                        )*
+                    }
+                }
+
+                #[allow(unreachable_patterns)]
+                proof fn prop_mux_wf(self, arch: $crate::Arch) {
+                    reveal(<$name as $crate::Syscall>::spec_mux);
+                    reveal(<$name as $crate::Syscall>::spec_signature);
+                    match self {
+                        $(
+                            $name::$variant => match arch {
+                                $( $crate::Arch::$march => $crate::Cond::lemma_masked_wf(arch,
+                                    $crate::Syscall::spec_signature($name::$mux, arch), $n, $mask, $val), )*
+                                _ => {},
                             },
                         )*
                     }
@@ -87,7 +171,7 @@ macro_rules! syscalls {
 
         impl $name {
             /// Returns the syscall's name.
-            pub(crate) const fn name(&self) -> &'static str {
+            pub const fn name(&self) -> &'static str {
                 match self {
                     $( $name::$variant => $sname, )*
                 }
@@ -115,7 +199,7 @@ macro_rules! syscalls {
     };
 }
 
-syscalls! {
+impl_syscall! {
     /// All syscall identifiers from Linux v7.0.
     ///
     /// Syscall numbers:
@@ -130,9 +214,12 @@ syscalls! {
     /// ([`SYSCALL_DEFINEx`](https://github.com/torvalds/linux/blob/v7.0/include/linux/syscalls.h)),
     /// with 64-bit arguments unsplit
     /// (x86's [`ia32_*` wrappers](https://github.com/torvalds/linux/blob/v7.0/arch/x86/kernel/sys_ia32.c) and `SC_ARG64`).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Structural)]
+    ///
+    /// Multiplexed calls: `SYS_*` in `linux/net.h` for `socketcall`, and `linux/ipc.h` for `ipc`,
+    /// which dispatches on the low 16 bits of its call number.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
-    pub enum Syscall {
+    pub enum SyscallLinuxV7 {
         // A special syscall to indicate it has been skipped.
         #[name("skip")]
         #[on(X86, -1)]
@@ -144,12 +231,14 @@ syscalls! {
         #[on(X86_64, 43, I(32), Ptr, Ptr)]
         #[on(Arm, 285, I(32), Ptr, Ptr)]
         #[on(Aarch64, 202, I(32), Ptr, Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 5)]
         Accept,
         #[name("accept4")]
         #[on(X86, 364, I(32), Ptr, Ptr, I(32))]
         #[on(X86_64, 288, I(32), Ptr, Ptr, I(32))]
         #[on(Arm, 366, I(32), Ptr, Ptr, I(32))]
         #[on(Aarch64, 242, I(32), Ptr, Ptr, I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 18)]
         Accept4,
         #[name("access")]
         #[on(X86, 33, Ptr, I(32))]
@@ -201,6 +290,7 @@ syscalls! {
         #[on(X86_64, 49, I(32), Ptr, I(32))]
         #[on(Arm, 282, I(32), Ptr, I(32))]
         #[on(Aarch64, 200, I(32), Ptr, I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 2)]
         Bind,
         #[name("bpf")]
         #[on(X86, 357, I(32), Ptr, U(32))]
@@ -346,6 +436,7 @@ syscalls! {
         #[on(X86_64, 42, I(32), Ptr, I(32))]
         #[on(Arm, 283, I(32), Ptr, I(32))]
         #[on(Aarch64, 203, I(32), Ptr, I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 3)]
         Connect,
         #[name("copy_file_range")]
         #[on(X86, 377, I(32), Ptr, I(32), Ptr, UWord, U(32))]
@@ -797,6 +888,7 @@ syscalls! {
         #[on(X86_64, 52, I(32), Ptr, Ptr)]
         #[on(Arm, 287, I(32), Ptr, Ptr)]
         #[on(Aarch64, 205, I(32), Ptr, Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 7)]
         Getpeername,
         #[name("getpgid")]
         #[on(X86, 132, I(32))]
@@ -885,12 +977,14 @@ syscalls! {
         #[on(X86_64, 51, I(32), Ptr, Ptr)]
         #[on(Arm, 286, I(32), Ptr, Ptr)]
         #[on(Aarch64, 204, I(32), Ptr, Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 6)]
         Getsockname,
         #[name("getsockopt")]
         #[on(X86, 365, I(32), I(32), I(32), Ptr, Ptr)]
         #[on(X86_64, 55, I(32), I(32), I(32), Ptr, Ptr)]
         #[on(Arm, 295, I(32), I(32), I(32), Ptr, Ptr)]
         #[on(Aarch64, 209, I(32), I(32), I(32), Ptr, Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 15)]
         Getsockopt,
         #[name("get_thread_area")]
         #[on(X86, 244, Ptr)]
@@ -1133,6 +1227,7 @@ syscalls! {
         #[on(X86_64, 50, I(32), I(32))]
         #[on(Arm, 284, I(32), I(32))]
         #[on(Aarch64, 201, I(32), I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 4)]
         Listen,
         #[name("listmount")]
         #[on(X86, 458, Ptr, Ptr, UWord, U(32))]
@@ -1416,24 +1511,28 @@ syscalls! {
         #[on(X86_64, 71, I(32), I(32), Ptr)]
         #[on(Arm, 304, I(32), I(32), Ptr)]
         #[on(Aarch64, 187, I(32), I(32), Ptr)]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 14)]
         Msgctl,
         #[name("msgget")]
         #[on(X86, 399, I(32), I(32))]
         #[on(X86_64, 68, I(32), I(32))]
         #[on(Arm, 303, I(32), I(32))]
         #[on(Aarch64, 186, I(32), I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 13)]
         Msgget,
         #[name("msgrcv")]
         #[on(X86, 401, I(32), Ptr, UWord, IWord, I(32))]
         #[on(X86_64, 70, I(32), Ptr, UWord, IWord, I(32))]
         #[on(Arm, 302, I(32), Ptr, UWord, IWord, I(32))]
         #[on(Aarch64, 188, I(32), Ptr, UWord, IWord, I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 12)]
         Msgrcv,
         #[name("msgsnd")]
         #[on(X86, 400, I(32), Ptr, UWord, I(32))]
         #[on(X86_64, 69, I(32), Ptr, UWord, I(32))]
         #[on(Arm, 301, I(32), Ptr, UWord, I(32))]
         #[on(Aarch64, 189, I(32), Ptr, UWord, I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 11)]
         Msgsnd,
         #[name("msync")]
         #[on(X86, 144, UWord, UWord, I(32))]
@@ -1787,18 +1886,21 @@ syscalls! {
         Reboot,
         #[name("recv")]
         #[on(Arm, 291, I(32), Ptr, UWord, U(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 10)]
         Recv,
         #[name("recvfrom")]
         #[on(X86, 371, I(32), Ptr, UWord, U(32), Ptr, Ptr)]
         #[on(X86_64, 45, I(32), Ptr, UWord, U(32), Ptr, Ptr)]
         #[on(Arm, 292, I(32), Ptr, UWord, U(32), Ptr, Ptr)]
         #[on(Aarch64, 207, I(32), Ptr, UWord, U(32), Ptr, Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 12)]
         Recvfrom,
         #[name("recvmmsg")]
         #[on(X86, 337, I(32), Ptr, U(32), U(32), Ptr)]
         #[on(X86_64, 299, I(32), Ptr, U(32), U(32), Ptr)]
         #[on(Arm, 365, I(32), Ptr, U(32), U(32), Ptr)]
         #[on(Aarch64, 243, I(32), Ptr, U(32), U(32), Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 19)]
         Recvmmsg,
         #[name("recvmmsg_time64")]
         #[on(X86, 417, I(32), Ptr, U(32), U(32), Ptr)]
@@ -1809,6 +1911,7 @@ syscalls! {
         #[on(X86_64, 47, I(32), Ptr, U(32))]
         #[on(Arm, 297, I(32), Ptr, U(32))]
         #[on(Aarch64, 212, I(32), Ptr, U(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 17)]
         Recvmsg,
         #[name("remap_file_pages")]
         #[on(X86, 257, UWord, UWord, UWord, UWord, UWord)]
@@ -2020,22 +2123,26 @@ syscalls! {
         #[on(X86_64, 66, I(32), I(32), I(32), UWord)]
         #[on(Arm, 300, I(32), I(32), I(32), UWord)]
         #[on(Aarch64, 191, I(32), I(32), I(32), UWord)]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 3)]
         Semctl,
         #[name("semget")]
         #[on(X86, 393, I(32), I(32), I(32))]
         #[on(X86_64, 64, I(32), I(32), I(32))]
         #[on(Arm, 299, I(32), I(32), I(32))]
         #[on(Aarch64, 190, I(32), I(32), I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 2)]
         Semget,
         #[name("semop")]
         #[on(X86_64, 65, I(32), Ptr, U(32))]
         #[on(Arm, 298, I(32), Ptr, U(32))]
         #[on(Aarch64, 193, I(32), Ptr, U(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 1)]
         Semop,
         #[name("semtimedop")]
         #[on(X86_64, 220, I(32), Ptr, U(32), Ptr)]
         #[on(Arm, 312, I(32), Ptr, U(32), Ptr)]
         #[on(Aarch64, 192, I(32), Ptr, U(32), Ptr)]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 4)]
         Semtimedop,
         #[name("semtimedop_time64")]
         #[on(X86, 420, I(32), Ptr, U(32), Ptr)]
@@ -2043,6 +2150,7 @@ syscalls! {
         SemtimedopTime64,
         #[name("send")]
         #[on(Arm, 289, I(32), Ptr, UWord, U(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 9)]
         Send,
         #[name("sendfile")]
         #[on(X86, 187, I(32), I(32), Ptr, UWord)]
@@ -2059,18 +2167,21 @@ syscalls! {
         #[on(X86_64, 307, I(32), Ptr, U(32), U(32))]
         #[on(Arm, 374, I(32), Ptr, U(32), U(32))]
         #[on(Aarch64, 269, I(32), Ptr, U(32), U(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 20)]
         Sendmmsg,
         #[name("sendmsg")]
         #[on(X86, 370, I(32), Ptr, U(32))]
         #[on(X86_64, 46, I(32), Ptr, U(32))]
         #[on(Arm, 296, I(32), Ptr, U(32))]
         #[on(Aarch64, 211, I(32), Ptr, U(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 16)]
         Sendmsg,
         #[name("sendto")]
         #[on(X86, 369, I(32), Ptr, UWord, U(32), Ptr, I(32))]
         #[on(X86_64, 44, I(32), Ptr, UWord, U(32), Ptr, I(32))]
         #[on(Arm, 290, I(32), Ptr, UWord, U(32), Ptr, I(32))]
         #[on(Aarch64, 206, I(32), Ptr, UWord, U(32), Ptr, I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 11)]
         Sendto,
         #[name("setdomainname")]
         #[on(X86, 121, Ptr, I(32))]
@@ -2223,6 +2334,7 @@ syscalls! {
         #[on(X86_64, 54, I(32), I(32), I(32), Ptr, I(32))]
         #[on(Arm, 294, I(32), I(32), I(32), Ptr, I(32))]
         #[on(Aarch64, 208, I(32), I(32), I(32), Ptr, I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 14)]
         Setsockopt,
         #[name("set_thread_area")]
         #[on(X86, 243, Ptr)]
@@ -2273,30 +2385,35 @@ syscalls! {
         #[on(X86_64, 30, I(32), Ptr, I(32))]
         #[on(Arm, 305, I(32), Ptr, I(32))]
         #[on(Aarch64, 196, I(32), Ptr, I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 21)]
         Shmat,
         #[name("shmctl")]
         #[on(X86, 396, I(32), I(32), Ptr)]
         #[on(X86_64, 31, I(32), I(32), Ptr)]
         #[on(Arm, 308, I(32), I(32), Ptr)]
         #[on(Aarch64, 195, I(32), I(32), Ptr)]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 24)]
         Shmctl,
         #[name("shmdt")]
         #[on(X86, 398, Ptr)]
         #[on(X86_64, 67, Ptr)]
         #[on(Arm, 306, Ptr)]
         #[on(Aarch64, 197, Ptr)]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 22)]
         Shmdt,
         #[name("shmget")]
         #[on(X86, 395, I(32), UWord, I(32))]
         #[on(X86_64, 29, I(32), UWord, I(32))]
         #[on(Arm, 307, I(32), UWord, I(32))]
         #[on(Aarch64, 194, I(32), UWord, I(32))]
+        #[mux(X86, Ipc, @0 & 0xFFFF == 23)]
         Shmget,
         #[name("shutdown")]
         #[on(X86, 373, I(32), I(32))]
         #[on(X86_64, 48, I(32), I(32))]
         #[on(Arm, 293, I(32), I(32))]
         #[on(Aarch64, 210, I(32), I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 13)]
         Shutdown,
         #[name("sigaction")]
         #[on(X86, 67, I(32), Ptr, Ptr)]
@@ -2343,6 +2460,7 @@ syscalls! {
         #[on(X86_64, 41, I(32), I(32), I(32))]
         #[on(Arm, 281, I(32), I(32), I(32))]
         #[on(Aarch64, 198, I(32), I(32), I(32))]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 1)]
         Socket,
         #[name("socketcall")]
         #[on(X86, 102, I(32), Ptr)]
@@ -2352,6 +2470,7 @@ syscalls! {
         #[on(X86_64, 53, I(32), I(32), I(32), Ptr)]
         #[on(Arm, 288, I(32), I(32), I(32), Ptr)]
         #[on(Aarch64, 199, I(32), I(32), I(32), Ptr)]
+        #[mux(X86, Socketcall, @0 & 0xFFFF_FFFF == 8)]
         Socketpair,
         #[name("splice")]
         #[on(X86, 313, I(32), Ptr, I(32), Ptr, UWord, U(32))]
@@ -2715,59 +2834,3 @@ syscalls! {
         Writev,
     }
 }
-
-impl Syscall {
-    /// `SYS_*` from `linux/net.h`: the call number under which x86 reaches this syscall through `socketcall`.
-    pub open spec fn to_socketcall_arg(self) -> Option<u64> {
-        match self {
-            Syscall::Socket       => Some(1),
-            Syscall::Bind         => Some(2),
-            Syscall::Connect      => Some(3),
-            Syscall::Listen       => Some(4),
-            Syscall::Accept       => Some(5),
-            Syscall::Getsockname  => Some(6),
-            Syscall::Getpeername  => Some(7),
-            Syscall::Socketpair   => Some(8),
-            Syscall::Send         => Some(9),
-            Syscall::Recv         => Some(10),
-            Syscall::Sendto       => Some(11),
-            Syscall::Recvfrom     => Some(12),
-            Syscall::Shutdown     => Some(13),
-            Syscall::Setsockopt   => Some(14),
-            Syscall::Getsockopt   => Some(15),
-            Syscall::Sendmsg      => Some(16),
-            Syscall::Recvmsg      => Some(17),
-            Syscall::Accept4      => Some(18),
-            Syscall::Recvmmsg     => Some(19),
-            Syscall::Sendmmsg     => Some(20),
-            _ => None,
-        }
-    }
- 
-    /// `linux/ipc.h`: the call number under which x86 reaches this syscall through `ipc`.
-    pub open spec fn to_ipc_arg(self) -> Option<u64> {
-        match self {
-            Syscall::Semop        => Some(1),
-            Syscall::Semget       => Some(2),
-            Syscall::Semctl       => Some(3),
-            Syscall::Semtimedop   => Some(4),
-            Syscall::Msgsnd       => Some(11),
-            Syscall::Msgrcv       => Some(12),
-            Syscall::Msgget       => Some(13),
-            Syscall::Msgctl       => Some(14),
-            Syscall::Shmat        => Some(21),
-            Syscall::Shmdt        => Some(22),
-            Syscall::Shmget       => Some(23),
-            Syscall::Shmctl       => Some(24),
-            _ => None,
-        }
-    }
-
-    /// Whether the syscall symbol may match more than one
-    /// concrete syscall numbers on one arch.
-    pub open spec fn can_mux(self) -> bool {
-        self.to_socketcall_arg() is Some || self.to_ipc_arg() is Some
-    }
-}
-
-} // verus!

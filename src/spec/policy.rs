@@ -2,7 +2,6 @@
 
 use vstd::prelude::*;
 use std::sync::Arc;
-use super::syscall::*;
 use super::expr::*;
 
 // Syntax
@@ -33,14 +32,42 @@ pub enum Action {
     Notify,
 }
 
+/// Abstraction for syscall symbols with type signatures.
+pub trait Syscall: Copy {
+    spec fn spec_nr(self, arch: Arch) -> Option<i32>;
+    spec fn spec_signature(self, arch: Arch) -> Seq<PrimType>;
+    spec fn spec_mux(self, arch: Arch) -> Option<(Self, Cond)>;
+
+    /// Returns the syscall number for this symbol.
+    fn nr(self, arch: Arch) -> (res: Option<i32>)
+        ensures res == self.spec_nr(arch);
+
+    /// Returns the type signature for this symbol.
+    fn signature(self, arch: Arch) -> (res: &'static [PrimType])
+        ensures res@ =~= self.spec_signature(arch);
+
+    /// Looks up the symbol by name (only used by macros).
+    fn lookup(name: &str) -> Option<Self>;
+
+    /// Returns whether the given symbol have a multiplexed syscall
+    /// (e.g., `socket(..)` is multiplexed with `socketcall(1, ..)`)
+    fn mux(self, arch: Arch) -> (res: Option<(Self, Cond)>)
+        ensures res == self.spec_mux(arch);
+
+    /// Conditions returned by the multiplexed call must be well-formed.
+    proof fn prop_mux_wf(self, arch: Arch)
+        ensures self.spec_mux(arch) matches Some((mux, cond))
+            ==> cond.wf(arch, mux.spec_signature(arch));
+}
+
 /// A policy rule, which applies an action to a syscall event if
 /// certain condition is satisfied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
 #[verifier::external_derive(Clone)]
-pub struct Rule {
+pub struct Rule<S: Syscall> {
     pub action: Action,
-    pub syscall: Syscall,
+    pub syscall: S,
     pub cond: Arc<Cond>,
     /// Limits the rule to the given list of archs.
     /// If empty, uses the global supported archs.
@@ -54,9 +81,9 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Verus does not yet model non-Copy Clone derives.
 #[verifier::external_derive(Clone)]
-pub struct Policy {
+pub struct Policy<S: Syscall> {
     pub archs: Vec<Arch>,
-    pub rules: Vec<Rule>,
+    pub rules: Vec<Rule<S>>,
     /// Default action when the arch is supported but no rule matches.
     pub act_no_match: Action,
     /// Default action when the arch is not supported.
@@ -94,7 +121,7 @@ impl Action {
     }
 }
 
-impl Rule {
+impl<S: Syscall> Rule<S> {
     /// Active architectures, given the global default architectures.
     ///
     /// NOTE: Even under the `wf()` condition, a rule may still contain
@@ -122,7 +149,8 @@ impl Rule {
         // When allowing mux, the rule should not have any conditions
         // since the multiplexed call may have different argument positions.
         // TODO: Ideally, we should only check this if x86 is enabled
-        &&& !self.no_mux && self.syscall.can_mux() ==> *self.cond == Cond::True
+        &&& forall |i: int| 0 <= i < active_archs.len() ==>
+                !self.no_mux && self.syscall.spec_mux(#[trigger] active_archs[i]) is Some ==> *self.cond == Cond::True
         // If a rule's syscall differ in signature on two different supported architectures,
         // it must not impose a condition on the argument.
         &&& forall |i: int, j: int| #![trigger active_archs[i], active_archs[j]]
@@ -132,7 +160,7 @@ impl Rule {
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     pub open spec fn wf(self) -> bool {
         &&& self.act_no_match.wf()
         &&& self.act_bad_arch.wf()
@@ -275,32 +303,31 @@ impl Action {
     }
 }
 
-impl Rule {
+impl<S: Syscall> Rule<S> {
     /// Whether this rule matches event `ev` on `arch`.
     pub open spec fn eval(self, arch: Arch, ev: Event) -> bool {
         let sig = self.syscall.spec_signature(arch);
         (self.archs@.len() == 0 || self.archs@.contains(arch)) && {
-            ||| self.syscall.nr(arch) == Some(ev.nr) &&
+            ||| self.syscall.spec_nr(arch) == Some(ev.nr) &&
                 self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
-            // Matching against multiplexed `socketcall` or `ipc` on x86.
-            // NOTE: `Rule::wf` already enforces `*self.cond == Cond::True` if `!self.no_mux`
-            ||| !self.no_mux && arch == Arch::X86 && {
-                ||| Syscall::Socketcall.nr(arch) == Some(ev.nr)
-                    && self.syscall.to_socketcall_arg() == Some(ev.args[0] & 0xFFFF_FFFF)
-                ||| Syscall::Ipc.nr(arch) == Some(ev.nr)
-                    // The kernel dispatches on the low 16 bits of the call number.
-                    && self.syscall.to_ipc_arg() == Some(ev.args[0] & 0xFFFF)
+            // Alternatively, there could be a multiplexed syscall on certain archs,
+            // e.g., `socket` and `socketcall` on x86.
+            ||| {
+                &&& !self.no_mux
+                &&& self.syscall.spec_mux(arch) matches Some((mux, cond))
+                &&& mux.spec_nr(arch) == Some(ev.nr)
+                &&& cond.eval(arch, mux.spec_signature(arch), arch.interp_args(ev.args, mux.spec_signature(arch)))
             }
         }
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     pub open spec fn is_active_arch(self, arch: Arch, ev: Event) -> bool {
         &&& self.archs@.contains(arch)
         &&& ev.arch == arch.token()
         // Reject x32 syscall numbers, except -1, which a tracer uses to skip a syscall.
-        &&& arch == Arch::X86_64 ==> ev.nr & 0x40000000 == 0 || Some(ev.nr) == Syscall::Skip.nr(arch)
+        &&& arch == Arch::X86_64 ==> ev.nr & 0x40000000 == 0 || ev.nr == -1
     }
 
     /// Defines whether evaluating the policy on event `ev`
