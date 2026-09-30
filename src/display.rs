@@ -1,7 +1,7 @@
 //! `Display` impls for policy AST.
 
 use std::fmt::{self, Display, Formatter};
-use crate::spec::{policy::*, expr::*, syscall::Syscall};
+use crate::spec::{policy::*, expr::*};
 
 impl Display for PrimType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -12,12 +12,6 @@ impl Display for PrimType {
             PrimType::UWord => write!(f, "usize"),
             PrimType::Ptr => write!(f, "ptr"),
         }
-    }
-}
-
-impl Display for Syscall {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
     }
 }
 
@@ -168,7 +162,7 @@ impl Display for Action {
     }
 }
 
-impl Display for Rule {
+impl<S: Syscall + Display> Display for Rule<S> {
     /// Writes the rule with no argument names, so its condition refers to each argument as `@n`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if !self.archs.is_empty() {
@@ -187,7 +181,7 @@ impl Display for Rule {
     }
 }
 
-impl Display for Policy {
+impl<S: Syscall + Display> Display for Policy<S> {
     /// Writes the header and then each rule on a line of its own.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let archs: Vec<_> = self.archs.iter().map(Arch::to_string).collect();

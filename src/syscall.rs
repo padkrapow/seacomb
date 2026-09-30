@@ -1,31 +1,32 @@
 use vstd::prelude::*;
 use std::sync::Arc;
 use crate::spec::expr::{BinOp, CmpOp, Cond, Expr, PrimType};
+#[allow(unused_imports)]
 use crate::spec::policy::Arch;
 
 verus! {
 
 impl Cond {
-    /// The multiplexer condition `@n & mask == val`, with both literals of type `ty`.
-    pub open spec fn spec_masked(n: u32, mask: i64, val: i64, ty: PrimType) -> Cond {
+    /// Generates a condition of the form `@n & mask == val`, with both literals of type `ty`.
+    pub open spec fn spec_masked_eq(n: u32, mask: i64, val: i64, ty: PrimType) -> Cond {
         Cond::Cmp(CmpOp::Eq,
             Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
             Arc::new(Expr::Lit(val, ty)))
     }
 
-    /// Executable version of `Cond::spec_masked`.
-    pub fn masked(n: u32, mask: i64, val: i64, ty: PrimType) -> (res: Cond)
-        ensures res == Cond::spec_masked(n, mask, val, ty)
+    /// Executable version of `Cond::spec_masked_eq`.
+    pub fn masked_eq(n: u32, mask: i64, val: i64, ty: PrimType) -> (res: Cond)
+        ensures res == Cond::spec_masked_eq(n, mask, val, ty)
     {
         Cond::Cmp(CmpOp::Eq,
             Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
             Arc::new(Expr::Lit(val, ty)))
     }
 
-    /// A masked condition is well-formed when argument `n` has a non-pointer type.
-    pub proof fn lemma_masked_wf(arch: Arch, sig: Seq<PrimType>, n: u32, mask: i64, val: i64)
+    /// A masked equality is well-formed when argument `n` has a non-pointer type.
+    pub proof fn lemma_masked_eq_wf(arch: Arch, sig: Seq<PrimType>, n: u32, mask: i64, val: i64)
         requires n < sig.len(), sig[n as int].wf(), sig[n as int] != PrimType::Ptr
-        ensures Cond::spec_masked(n, mask, val, sig[n as int]).wf(arch, sig)
+        ensures Cond::spec_masked_eq(n, mask, val, sig[n as int]).wf(arch, sig)
     {
         let ty = sig[n as int];
         let e = Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)));
@@ -96,7 +97,7 @@ macro_rules! impl_syscall {
                     match self {
                         $(
                             $name::$variant => match arch {
-                                $( $crate::Arch::$march => Some(($name::$mux, $crate::Cond::spec_masked($n, $mask, $val,
+                                $( $crate::Arch::$march => Some(($name::$mux, $crate::Cond::spec_masked_eq($n, $mask, $val,
                                     $crate::Syscall::spec_signature($name::$mux, arch)[$n]))), )*
                                 _ => None,
                             },
@@ -132,7 +133,21 @@ macro_rules! impl_syscall {
 
                 #[verifier::external_body]
                 fn lookup(name: &str) -> Option<Self> {
-                    $name::lookup(name)
+                    let names: &[(&str, $name)] = &[ $( ($sname, $name::$variant), )* ];
+                    let name = name.as_bytes();
+                    let mut i = 0;
+                    while i < names.len() {
+                        let cand = names[i].0.as_bytes();
+                        let mut j = 0;
+                        while j < name.len() && j < cand.len() && name[j] == cand[j] {
+                            j += 1;
+                        }
+                        if j == name.len() && j == cand.len() {
+                            return Some(names[i].1);
+                        }
+                        i += 1;
+                    }
+                    None
                 }
 
                 #[allow(unreachable_patterns)]
@@ -144,7 +159,7 @@ macro_rules! impl_syscall {
                             $name::$variant => match arch {
                                 $( $crate::Arch::$march => {
                                     let sig = $crate::Syscall::signature($name::$mux, arch);
-                                    Some(($name::$mux, $crate::Cond::masked($n, $mask, $val, sig[$n])))
+                                    Some(($name::$mux, $crate::Cond::masked_eq($n, $mask, $val, sig[$n])))
                                 }, )*
                                 _ => None,
                             },
@@ -159,7 +174,7 @@ macro_rules! impl_syscall {
                     match self {
                         $(
                             $name::$variant => match arch {
-                                $( $crate::Arch::$march => $crate::Cond::lemma_masked_wf(arch,
+                                $( $crate::Arch::$march => $crate::Cond::lemma_masked_eq_wf(arch,
                                     $crate::Syscall::spec_signature($name::$mux, arch), $n, $mask, $val), )*
                                 _ => {},
                             },
@@ -169,38 +184,18 @@ macro_rules! impl_syscall {
             }
         }
 
-        impl $name {
-            /// Returns the syscall's name.
-            pub const fn name(&self) -> &'static str {
-                match self {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(match self {
                     $( $name::$variant => $sname, )*
-                }
-            }
-
-            /// Finds the syscall with the given name.
-            pub const fn lookup(name: &str) -> Option<$name> {
-                const NAMES: &'static [(&'static str, $name)] = &[ $( ($sname, $name::$variant), )* ];
-                let name = name.as_bytes();
-                let mut i = 0;
-                while i < NAMES.len() {
-                    let cand = NAMES[i].0.as_bytes();
-                    let mut j = 0;
-                    while j < name.len() && j < cand.len() && name[j] == cand[j] {
-                        j += 1;
-                    }
-                    if j == name.len() && j == cand.len() {
-                        return Some(NAMES[i].1);
-                    }
-                    i += 1;
-                }
-                None
+                })
             }
         }
     };
 }
 
 impl_syscall! {
-    /// All syscall identifiers from Linux v7.0.
+    /// All syscall symbols from Linux v7.0.
     ///
     /// Syscall numbers:
     /// [x86](https://github.com/torvalds/linux/blob/v7.0/arch/x86/entry/syscalls/syscall_32.tbl),

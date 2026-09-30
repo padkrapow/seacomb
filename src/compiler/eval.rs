@@ -3,7 +3,7 @@
 use vstd::prelude::*;
 use crate::spec::policy::*;
 #[allow(unused_imports)]
-use crate::spec::syscall::*;
+use crate::spec::expr::*;
 
 verus! {
 
@@ -15,56 +15,44 @@ impl Arch {
     }
 }
 
-impl Rule {
+impl<S: Syscall> Rule<S> {
     /// Whether the rule is evaluated on `arch`, given that the policy includes `arch`.
     pub(super) open spec fn active_on(self, arch: Arch) -> bool {
         self.archs@.len() == 0 || self.archs@.contains(arch)
     }
 
-    /// Whether the rule's body accepts `ev`: multiplexer selector and mask `sel` if there
-    /// are any, and the rule's condition otherwise.
-    pub(super) open spec fn body_holds(self, arch: Arch, sel: Option<(u32, u32)>, ev: Event) -> bool {
-        match sel {
-            Some((arg, mask)) => arg == (ev.args[0] & mask as u64) as u32,
-            None => {
-                let sig = self.syscall.spec_signature(arch);
-                self.cond.eval(arch, sig, arch.interp_args(ev.args, sig))
-            }
-        }
-    }
-
-    /// Whether the test for syscall number `nr` reaches this rule and its body, with
-    /// selector and mask `sel`, accepts `ev`.
-    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, sel: Option<(u32, u32)>, ev: Event) -> bool {
-        ev.nr as u32 == nr && self.body_holds(arch, sel, ev)
+    /// Whether the test for syscall number `nr` reaches this rule, and `cond` over
+    /// signature `sig` then accepts `ev`.
+    pub(super) open spec fn matches_at(self, arch: Arch, nr: u32, cond: Cond, sig: Seq<PrimType>, ev: Event) -> bool {
+        ev.nr as u32 == nr && cond.eval(arch, sig, arch.interp_args(ev.args, sig))
     }
 
     /// Whether either of the tests a block emits for this rule reaches it and accepts `ev`.
     pub(super) open spec fn matches(self, arch: Arch, ev: Event) -> bool {
-        ||| match self.syscall.spec_bpf_nr(arch) {
-                Some(nr) => self.matches_at(arch, nr, None, ev),
+        ||| match self.syscall.spec_nr(arch) {
+                Some(nr) => self.matches_at(arch, nr as u32, *self.cond, self.syscall.spec_signature(arch), ev),
                 None => false,
             }
-        ||| match self.spec_mux(arch) {
-                Some((nr, arg, mask)) => self.matches_at(arch, nr, Some((arg, mask)), ev),
+        ||| !self.no_mux && match self.syscall.spec_mux(arch) {
+                Some((mux, cond)) => match mux.spec_nr(arch) {
+                    Some(nr) => self.matches_at(arch, nr as u32, cond, mux.spec_signature(arch), ev),
+                    None => false,
+                },
                 None => false,
             }
     }
 
     /// The tests a block emits for this rule come to the rule's own account of matching.
     pub(super) proof fn lemma_matches(self, arch: Arch, ev: Event)
-        requires ev.args.len() == Rule::ARG_COUNT_MAX, self.active_on(arch)
+        requires ev.args.len() == Event::ARG_COUNT_MAX, self.active_on(arch)
         ensures self.matches(arch, ev) <==> self.eval(arch, ev)
     {
         let m = ev.nr;
         assert(forall |nr: i32| #[trigger] (nr as u32) == (m as u32) ==> nr == m) by (bit_vector);
-        // Socketcall reads the low word; ipc reads the low 16 bits.
-        assert(forall |x: u64| #[trigger] (x & 0xFFFF_FFFF) < 0x1_0000_0000) by (bit_vector);
-        assert(forall |x: u64| #[trigger] (x & 0xFFFF) < 0x1_0000_0000) by (bit_vector);
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Whether rule `j` is included in the emitted priority buckets and rule prefix.
     pub(super) open spec fn included(self, j: int, priority: int, i: int) -> bool {
         &&& 0 <= j < self.rules@.len()
@@ -138,9 +126,6 @@ impl Policy {
         ensures self.eval(ev, self.blocks(ev, i))
         decreases self.archs@.len() - i
     {
-        assert(Syscall::Skip.spec_nr(Arch::X86_64) == Some(-1i32)) by {
-            reveal(Syscall::spec_nr);
-        }
         if i >= self.archs@.len() {
             assert forall |a: Arch| !self.is_active_arch(a, ev) by {
                 if self.is_active_arch(a, ev) {

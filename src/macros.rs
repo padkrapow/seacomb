@@ -214,22 +214,25 @@ macro_rules! cond {
     ($($t:tt)*) => { ::std::sync::Arc::unwrap_or_clone($crate::cond!(@arc $($t)*)) };
 }
 
-/// Parses a rule into a `Rule`.
+/// Parses a rule into a `Result<Rule, Error>`.
 ///
 /// ```
 /// use seacomb::*;
 ///
 /// // Unconditional rules.
-/// rule!(kill execve(_, _, _));
-/// rule!(trap(7) getpid());
+/// rule!(kill execve(_, _, _)).unwrap();
+/// rule!(trap(7) getpid()).unwrap();
 ///
 /// // Conditional rules.
-/// rule!(errno(1) write(fd, _, count) if fd == 2u32 && count > 0usize);
-/// rule!(log openat(_, _, flags) if flags & 0o100 != 0);
+/// rule!(errno(1) write(fd, _, count) if fd == 2u32 && count > 0usize).unwrap();
+/// rule!(log openat(_, _, flags) if flags & 0o100 != 0).unwrap();
 ///
 /// // `[..]` limits a rule to some archs, and `exact` skips the x86 `socketcall` form.
-/// rule!([x86] allow exact bind(fd, addr, len));
-/// rule!([x86_64, aarch64] notify ptrace());
+/// rule!([x86] allow exact bind(fd, addr, len)).unwrap();
+/// rule!([x86_64, aarch64] notify ptrace()).unwrap();
+///
+/// // A syscall the table lacks is an error.
+/// assert!(matches!(rule!(allow raed(fd)), Err(Error::UnknownSyscall("raed"))));
 /// ```
 #[macro_export]
 macro_rules! rule {
@@ -237,30 +240,36 @@ macro_rules! rule {
     // action  := kill | kill_thread | trap '(' rust-expr ')' | errno '(' rust-expr ')'
     //          | trace '(' rust-expr ')' | log | allow | notify | '{' rust-expr '}'
     // syscall := ident | '{' rust-expr '}'
-    (@act $archs:tt $a:ident ( $($e:tt)* ) $($rest:tt)*) => { $crate::rule!(@exact $archs [$a ($($e)*)] $($rest)*) };
-    (@act $archs:tt $a:ident $($rest:tt)*) => { $crate::rule!(@exact $archs [$a] $($rest)*) };
-    (@act $archs:tt { $($a:tt)* } $($rest:tt)*) => { $crate::rule!(@exact $archs [{ $($a)* }] $($rest)*) };
-    (@act $archs:tt $($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
+    (@act $sys:tt $archs:tt $a:ident ( $($e:tt)* ) $($rest:tt)*) =>
+        { $crate::rule!(@exact $sys $archs [$a ($($e)*)] $($rest)*) };
+    (@act $sys:tt $archs:tt $a:ident $($rest:tt)*) => { $crate::rule!(@exact $sys $archs [$a] $($rest)*) };
+    (@act $sys:tt $archs:tt { $($a:tt)* } $($rest:tt)*) => { $crate::rule!(@exact $sys $archs [{ $($a)* }] $($rest)*) };
+    (@act $sys:tt $archs:tt $($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
 
     // `exact` sets `no_mux`.
-    (@exact $archs:tt $act:tt exact $($rest:tt)*) => { $crate::rule!(@syscall $archs $act true $($rest)*) };
-    (@exact $archs:tt $act:tt $($rest:tt)*) => { $crate::rule!(@syscall $archs $act false $($rest)*) };
+    (@exact $sys:tt $archs:tt $act:tt exact $($rest:tt)*) => { $crate::rule!(@syscall $sys $archs $act true $($rest)*) };
+    (@exact $sys:tt $archs:tt $act:tt $($rest:tt)*) => { $crate::rule!(@syscall $sys $archs $act false $($rest)*) };
 
-    (@syscall $archs:tt $act:tt $exact:tt { $s:expr } ( $($names:tt)* ) $($rest:tt)*) =>
+    // A name is looked up in the syscall type `sys`.
+    (@syscall $sys:tt $archs:tt $act:tt $exact:tt { $s:expr } ( $($names:tt)* ) $($rest:tt)*) =>
         { $crate::rule!(@mk $archs $act $exact [$s] [$($names)*] $($rest)*) };
-    (@syscall $archs:tt $act:tt $exact:tt $name:ident ( $($names:tt)* ) $($rest:tt)*) => {
-        $crate::rule!(@mk $archs $act $exact [const {
-            match $crate::Syscall::lookup(stringify!($name)) {
+    (@syscall [$sys:ty] $archs:tt $act:tt $exact:tt $name:ident ( $($names:tt)* ) $($rest:tt)*) => {
+        $crate::rule!(@mk $archs $act $exact [
+            match <$sys as $crate::Syscall>::lookup(stringify!($name)) {
                 ::core::option::Option::Some(s) => s,
-                ::core::option::Option::None => ::core::panic!(concat!("unknown syscall `", stringify!($name), "`")),
+                ::core::option::Option::None =>
+                    return ::core::result::Result::Err($crate::Error::UnknownSyscall(stringify!($name))),
             }
-        }] [$($names)*] $($rest)*)
+        ] [$($names)*] $($rest)*)
     };
-    (@syscall $archs:tt $act:tt $exact:tt $($t:tt)*) =>
+    (@syscall $sys:tt $archs:tt $act:tt $exact:tt $($t:tt)*) =>
         { compile_error!(concat!("expected a syscall, found `", stringify!($($t)*), "`")) };
 
     // Binds each name to the argument at its position, so `if` can refer to it.
+    // Runs in a closure, so a failed lookup or `native` returns its error.
     (@mk [$($arch:tt),*] [$($act:tt)*] $exact:tt [$($sys:tt)*] [$($arg:tt),* $(,)?] $(if $($c:tt)+)?) => {{
+        #[allow(clippy::redundant_closure_call)]
+        let rule = (|| -> ::core::result::Result<$crate::Rule<_>, $crate::Error> { ::core::result::Result::Ok({
         $( $crate::rule!(@name $arg); )*
         #[allow(unused_variables)]
         let [$($arg,)* ..] = [
@@ -285,6 +294,8 @@ macro_rules! rule {
             },
             no_mux: $exact,
         }
+        }) })();
+        rule
     }};
     (@mk $archs:tt $act:tt $exact:tt $sys:tt $names:tt if) => { compile_error!("`if` wants a condition") };
     (@mk $archs:tt $act:tt $exact:tt $sys:tt $names:tt $($t:tt)*) =>
@@ -320,9 +331,12 @@ macro_rules! rule {
     (@arch { $a:expr }) => { $a };
     (@arch $a:tt) => { compile_error!(concat!("unknown arch `", stringify!($a), "`")) };
 
-    ([] $($t:tt)*) => { compile_error!("`[..]` wants at least one arch") };
-    ([$($arch:tt),+ $(,)?] $($rest:tt)*) => { $crate::rule!(@act [$($arch),+] $($rest)*) };
-    ($($rest:tt)*) => { $crate::rule!(@act [] $($rest)*) };
+    // A rule whose names are looked up in the syscall type `sys`, as `policy!` passes it.
+    (@with $sys:tt [] $($t:tt)*) => { compile_error!("`[..]` wants at least one arch") };
+    (@with $sys:tt [$($arch:tt),+ $(,)?] $($rest:tt)*) => { $crate::rule!(@act $sys [$($arch),+] $($rest)*) };
+    (@with $sys:tt $($rest:tt)*) => { $crate::rule!(@act $sys [] $($rest)*) };
+
+    ($($rest:tt)*) => { $crate::rule!(@with [$crate::SyscallLinuxV7] $($rest)*) };
 }
 
 /// Parses a policy into a `Result<Policy, Error>`.
@@ -338,7 +352,7 @@ macro_rules! rule {
 /// }.unwrap();
 ///
 /// // `native` is the current host at build time, and `{..}` embeds a Rust `Rule`.
-/// let no_ptrace = rule!(errno(1) ptrace(_, _, _, _));
+/// let no_ptrace = rule!(errno(1) ptrace(_, _, _, _)).unwrap();
 /// policy!(default allow on native; {no_ptrace}).unwrap();
 /// policy!(default errno(38) on native; allow read(); allow write(); allow exit_group()).unwrap();
 ///
@@ -347,7 +361,7 @@ macro_rules! rule {
 /// ```
 #[macro_export]
 macro_rules! policy {
-    // policy := header ';' (rule ';')*, where the last ';' may be left off
+    // policy := ['syscall' type ';'] header ';' (rule ';')*, where the last ';' may be left off
     // header := 'default' action 'on' arch (',' arch)* ['else' action], where a repeated arch counts once
     // arch   := rule's arch
     // rule   := rule's rule | '{' rust-expr '}'
@@ -366,12 +380,16 @@ macro_rules! policy {
     (@split [$($done:tt)*] []) => { $crate::policy!(@mk $($done)*) };
     (@split [$($done:tt)*] [$($cur:tt)*] $($rest:tt)*) => { $crate::policy!(@mk $($done)* [$($cur)* $($rest)*]) };
 
+    // Without a `syscall` line, rules name syscalls from `SyscallLinuxV7`.
+    (@mk [syscall $sys:ty] [$($header:tt)*] $($rules:tt)*) => { $crate::policy!(@build [$sys] [$($header)*] $($rules)*) };
+    (@mk [$($header:tt)*] $($rules:tt)*) => { $crate::policy!(@build [$crate::SyscallLinuxV7] [$($header)*] $($rules)*) };
+
     // Runs in a closure, so a failed step returns its error.
-    (@mk [$($header:tt)*] $([$($rule:tt)*])*) => {
-        (|| -> ::core::result::Result<$crate::Policy, $crate::Error> {
+    (@build [$sys:ty] [$($header:tt)*] $([$($rule:tt)*])*) => {
+        (|| -> ::core::result::Result<$crate::Policy<$sys>, $crate::Error> {
             #[allow(unused_mut)]
             let mut policy = $crate::policy!(@header $($header)*);
-            $( policy.add($crate::policy!(@rule $($rule)*))?; )*
+            $( policy.add($crate::policy!(@rule [$sys] $($rule)*))?; )*
             ::core::result::Result::Ok(policy)
         })()
     };
@@ -392,17 +410,14 @@ macro_rules! policy {
         policy
     }};
 
-    (@rule { $r:expr }) => { $r };
-    (@rule $($t:tt)*) => { $crate::rule!($($t)*) };
+    (@rule $sys:tt { $r:expr }) => { $r };
+    (@rule $sys:tt $($t:tt)*) => { $crate::rule!(@with $sys $($t)*)? };
 
     ($($t:tt)*) => { $crate::policy!(@split [] [] $($t)*) };
 }
 
 /// Cases that `rule!` should reject.
 ///
-/// ```compile_fail
-/// seacomb::rule!(allow raed(fd));
-/// ```
 /// ```compile_fail
 /// seacomb::rule!(deny read(fd));
 /// ```
@@ -504,7 +519,7 @@ struct PolicyMacroTests;
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use crate::{Action, Arch, CheckError, Cond, Error, Expr, PrimType, Syscall};
+    use crate::{Action, Arch, CheckError, Cond, Error, Expr, PrimType, SyscallLinuxV7};
 
     #[test]
     fn literal_types() {
@@ -630,39 +645,39 @@ mod tests {
     #[test]
     fn rule_actions() {
         let action = Action::Trap(7);
-        assert_eq!(format!("{:?}", rule!(allow getpid())),
+        assert_eq!(format!("{:?}", rule!(allow getpid()).unwrap()),
             "Rule { action: Allow, syscall: Getpid, cond: True, archs: [], no_mux: false }");
-        assert_eq!(format!("{:?}", rule!(errno(1) getpid()).action), "Errno(1)");
-        assert_eq!(format!("{:?}", rule!(errno(1 + 1) getpid()).action), "Errno(2)");
-        assert_eq!(format!("{:?}", rule!(kill getpid()).action), "KillProcess");
-        assert_eq!(format!("{:?}", rule!(kill_thread getpid()).action), "KillThread");
-        assert_eq!(format!("{:?}", rule!(trap(3) getpid()).action), "Trap(3)");
-        assert_eq!(format!("{:?}", rule!(trace(u16::MAX) getpid()).action), "Trace(65535)");
-        assert_eq!(format!("{:?}", rule!(log getpid()).action), "Log");
-        assert_eq!(format!("{:?}", rule!(notify getpid()).action), "Notify");
-        assert_eq!(format!("{:?}", rule!({action} getpid()).action), "Trap(7)");
-        assert_eq!(format!("{:?}", rule!({Action::Notify} getpid()).action), "Notify");
+        assert_eq!(format!("{:?}", rule!(errno(1) getpid()).unwrap().action), "Errno(1)");
+        assert_eq!(format!("{:?}", rule!(errno(1 + 1) getpid()).unwrap().action), "Errno(2)");
+        assert_eq!(format!("{:?}", rule!(kill getpid()).unwrap().action), "KillProcess");
+        assert_eq!(format!("{:?}", rule!(kill_thread getpid()).unwrap().action), "KillThread");
+        assert_eq!(format!("{:?}", rule!(trap(3) getpid()).unwrap().action), "Trap(3)");
+        assert_eq!(format!("{:?}", rule!(trace(u16::MAX) getpid()).unwrap().action), "Trace(65535)");
+        assert_eq!(format!("{:?}", rule!(log getpid()).unwrap().action), "Log");
+        assert_eq!(format!("{:?}", rule!(notify getpid()).unwrap().action), "Notify");
+        assert_eq!(format!("{:?}", rule!({action} getpid()).unwrap().action), "Trap(7)");
+        assert_eq!(format!("{:?}", rule!({Action::Notify} getpid()).unwrap().action), "Notify");
     }
 
     #[test]
     fn rule_syscalls() {
-        let syscall = Syscall::Lseek;
-        assert_eq!(format!("{:?}", rule!(allow exit_group(status)).syscall), "ExitGroup");
-        assert_eq!(format!("{:?}", rule!(allow _llseek(fd)).syscall), "_Llseek");
-        assert_eq!(format!("{:?}", rule!(allow break()).syscall), "Break");
-        assert_eq!(format!("{:?}", rule!(allow kill(pid, sig)).syscall), "Kill");
-        assert_eq!(format!("{:?}", rule!(kill kill(pid, sig)).syscall), "Kill");
-        assert_eq!(format!("{:?}", rule!(allow {syscall}(fd, offset) if offset == 0isize)),
+        let syscall = SyscallLinuxV7::Lseek;
+        assert_eq!(format!("{:?}", rule!(allow exit_group(status)).unwrap().syscall), "ExitGroup");
+        assert_eq!(format!("{:?}", rule!(allow _llseek(fd)).unwrap().syscall), "_Llseek");
+        assert_eq!(format!("{:?}", rule!(allow break()).unwrap().syscall), "Break");
+        assert_eq!(format!("{:?}", rule!(allow kill(pid, sig)).unwrap().syscall), "Kill");
+        assert_eq!(format!("{:?}", rule!(kill kill(pid, sig)).unwrap().syscall), "Kill");
+        assert_eq!(format!("{:?}", rule!(allow {syscall}(fd, offset) if offset == 0isize).unwrap()),
             "Rule { action: Allow, syscall: Lseek, cond: Cmp(Eq, Var(1), Lit(0, IWord)), archs: [], no_mux: false }");
     }
 
     #[test]
     fn rule_exact() {
-        let syscall = Syscall::Socket;
-        assert!(rule!(allow exact bind(fd, addr, len)).no_mux);
-        assert!(rule!(allow exact {syscall}()).no_mux);
-        assert!(!rule!(allow bind(fd, addr, len)).no_mux);
-        assert_eq!(format!("{:?}", rule!([x86] errno(1) exact socket(domain) if domain == 1)),
+        let syscall = SyscallLinuxV7::Socket;
+        assert!(rule!(allow exact bind(fd, addr, len)).unwrap().no_mux);
+        assert!(rule!(allow exact {syscall}()).unwrap().no_mux);
+        assert!(!rule!(allow bind(fd, addr, len)).unwrap().no_mux);
+        assert_eq!(format!("{:?}", rule!([x86] errno(1) exact socket(domain) if domain == 1).unwrap()),
             "Rule { action: Errno(1), syscall: Socket, cond: Cmp(Eq, Var(0), Lit(1, I(32))), archs: [X86], no_mux: true }");
     }
 
@@ -670,51 +685,40 @@ mod tests {
     fn rule_archs() {
         let native = Arch::Arm;
         let archs = [Arch::X86, Arch::Aarch64];
-        assert_eq!(format!("{:?}", rule!([x86] allow getpid()).archs), "[X86]");
-        assert_eq!(format!("{:?}", rule!([x86, x86_64, arm, aarch64] allow getpid()).archs), "[X86, X86_64, Arm, Aarch64]");
-        assert_eq!(format!("{:?}", rule!([{native}] allow getpid()).archs), "[Arm]");
-        assert_eq!(format!("{:?}", rule!([x86_64, {archs[1]}] allow getpid()).archs), "[X86_64, Aarch64]");
-        assert_eq!(format!("{:?}", rule!([x86, x86] allow getpid()).archs), "[X86]");
-        assert_eq!(format!("{:?}", rule!([x86, arm,] allow getpid()).archs), "[X86, Arm]");
+        assert_eq!(format!("{:?}", rule!([x86] allow getpid()).unwrap().archs), "[X86]");
+        assert_eq!(format!("{:?}", rule!([x86, x86_64, arm, aarch64] allow getpid()).unwrap().archs), "[X86, X86_64, Arm, Aarch64]");
+        assert_eq!(format!("{:?}", rule!([{native}] allow getpid()).unwrap().archs), "[Arm]");
+        assert_eq!(format!("{:?}", rule!([x86_64, {archs[1]}] allow getpid()).unwrap().archs), "[X86_64, Aarch64]");
+        assert_eq!(format!("{:?}", rule!([x86, x86] allow getpid()).unwrap().archs), "[X86]");
+        assert_eq!(format!("{:?}", rule!([x86, arm,] allow getpid()).unwrap().archs), "[X86, Arm]");
     }
 
     #[test]
     fn rule_conds() {
-        assert_eq!(format!("{:?}", rule!(allow getpid()).cond), "True");
-        assert_eq!(format!("{:?}", rule!(allow getpid() if false).cond), "False");
-        assert_eq!(format!("{:?}", rule!([arm] allow getpid() if true || false).cond), "Or(True, False)");
-        assert_eq!(format!("{:?}", rule!(allow write(fd, buf, count) if fd == 1u32 || count < 2usize).cond),
+        assert_eq!(format!("{:?}", rule!(allow getpid()).unwrap().cond), "True");
+        assert_eq!(format!("{:?}", rule!(allow getpid() if false).unwrap().cond), "False");
+        assert_eq!(format!("{:?}", rule!([arm] allow getpid() if true || false).unwrap().cond), "Or(True, False)");
+        assert_eq!(format!("{:?}", rule!(allow write(fd, buf, count) if fd == 1u32 || count < 2usize).unwrap().cond),
             "Or(Cmp(Eq, Var(0), Lit(1, U(32))), Cmp(Lt, Var(2), Lit(2, UWord)))");
         let c = cond!(@0 == 1);
-        assert_eq!(format!("{:?}", rule!(allow getpid() if {&c} && !{c}).cond),
+        assert_eq!(format!("{:?}", rule!(allow getpid() if {&c} && !{c}).unwrap().cond),
             "And(Cmp(Eq, Var(0), Lit(1, I(32))), Not(Cmp(Eq, Var(0), Lit(1, I(32)))))");
     }
 
     #[test]
     fn rule_names() {
         // `_` skips a position, and the names may stop short of the signature.
-        assert_eq!(format!("{:?}", rule!(allow openat(_, _, flags) if flags == 0).cond),
+        assert_eq!(format!("{:?}", rule!(allow openat(_, _, flags) if flags == 0).unwrap().cond),
             "Cmp(Eq, Var(2), Lit(0, I(32)))");
-        assert_eq!(format!("{:?}", rule!(allow mmap(a, b, c, d, e, f) if f == a).cond), "Cmp(Eq, Var(5), Var(0))");
-        assert_eq!(format!("{:?}", rule!(allow read(fd,) if fd == 0).cond), "Cmp(Eq, Var(0), Lit(0, I(32)))");
+        assert_eq!(format!("{:?}", rule!(allow mmap(a, b, c, d, e, f) if f == a).unwrap().cond), "Cmp(Eq, Var(5), Var(0))");
+        assert_eq!(format!("{:?}", rule!(allow read(fd,) if fd == 0).unwrap().cond), "Cmp(Eq, Var(0), Lit(0, I(32)))");
         // `@n` still means position `n` next to the names.
-        assert_eq!(format!("{:?}", rule!(allow read(fd) if fd == @2).cond), "Cmp(Eq, Var(0), Var(2))");
+        assert_eq!(format!("{:?}", rule!(allow read(fd) if fd == @2).unwrap().cond), "Cmp(Eq, Var(0), Var(2))");
         // A bare Rust variable is a value, and a name hides one of the same name, even in `{..}`.
         let fd = 3u32;
-        assert_eq!(format!("{:?}", rule!(allow read(count) if count == fd).cond), "Cmp(Eq, Var(0), Lit(3, U(32)))");
-        assert_eq!(format!("{:?}", rule!(allow read(fd) if fd == {fd}).cond), "Cmp(Eq, Var(0), Var(0))");
+        assert_eq!(format!("{:?}", rule!(allow read(count) if count == fd).unwrap().cond), "Cmp(Eq, Var(0), Lit(3, U(32)))");
+        assert_eq!(format!("{:?}", rule!(allow read(fd) if fd == {fd}).unwrap().cond), "Cmp(Eq, Var(0), Var(0))");
         assert_eq!(fd, 3);
-    }
-
-    #[test]
-    fn lookup() {
-        assert_eq!(Syscall::lookup("read"), Some(Syscall::Read));
-        assert_eq!(Syscall::lookup("_llseek"), Some(Syscall::_Llseek));
-        assert_eq!(Syscall::lookup("skip"), Some(Syscall::Skip));
-        assert_eq!(Syscall::lookup("rea"), None);
-        assert_eq!(Syscall::lookup("readx"), None);
-        assert_eq!(Syscall::lookup("Read"), None);
-        assert_eq!(Syscall::lookup(""), None);
     }
 
     #[test]
@@ -732,14 +736,14 @@ mod tests {
 
     #[test]
     fn policy_rules() {
-        let extra = rule!(log getuid());
+        let extra = rule!(log getuid()).unwrap();
         let policy = policy! {
             default allow on x86;
             errno(1) getpid();
             [x86] kill exact read(fd) if fd == 0u32;
             {extra.clone()}
         }.unwrap();
-        assert_eq!(policy.rules, [rule!(errno(1) getpid()), rule!([x86] kill exact read(fd) if fd == 0u32), extra]);
+        assert_eq!(policy.rules, [rule!(errno(1) getpid()).unwrap(), rule!([x86] kill exact read(fd) if fd == 0u32).unwrap(), extra]);
         // The last `;` may be left off.
         assert_eq!(policy!(default allow on x86; allow getpid();), policy!(default allow on x86; allow getpid()));
     }

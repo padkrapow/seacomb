@@ -10,7 +10,7 @@ mod policy;
 
 verus! {
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Whether this policy accepts an action for the event.
     /// Defined separately to be used as triggers.
     pub closed spec fn eval_defined(self, ev: Event) -> bool {
@@ -20,7 +20,7 @@ impl Policy {
     /// Compiling each policy preserves the chain's action, including data and tie-breaking.
     /// The per-pair premise is the successful `Policy::to_cbpf` postcondition.
     pub proof fn theorem_eval_chain_compiled(
-        policies: Seq<Policy>, filters: Seq<Program>,
+        policies: Seq<Policy<S>>, filters: Seq<Program>,
         data: &[u8], ev: Event,
     )
         requires
@@ -77,7 +77,7 @@ impl Policy {
     }
 
     /// A chain of well-formed policies admits at most one action for a given event.
-    pub proof fn theorem_eval_chain_functional(policies: Seq<Policy>, ev: Event)
+    pub proof fn theorem_eval_chain_functional(policies: Seq<Policy<S>>, ev: Event)
         requires forall |i: int| 0 <= i < policies.len() ==> #[trigger] policies[i].wf()
         ensures forall |a: Action, b: Action|
             Self::eval_chain(policies, ev, a) && Self::eval_chain(policies, ev, b) ==> a == b

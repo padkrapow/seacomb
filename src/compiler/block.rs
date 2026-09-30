@@ -65,14 +65,14 @@ impl Arch {
             }
         }
         let ghost guarded_nr = b.rev@;
-        b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_NR));
-        proof { Builder::lemma_ld(b.rev@, Policy::OFFSET_EVENT_NR); }
+        b.emit(Instr::LdAbs(Event::OFFSET_NR));
+        proof { Builder::lemma_ld(b.rev@, Event::OFFSET_NR); }
         let ghost loaded_nr = b.rev@;
         b.emit_jump(JmpOp::Eq, Src::K(self.to_token()), false, end)?;
         let ghost guarded_arch = b.rev@;
-        b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_ARCH));
+        b.emit(Instr::LdAbs(Event::OFFSET_ARCH));
         proof {
-            Builder::lemma_ld(b.rev@, Policy::OFFSET_EVENT_ARCH);
+            Builder::lemma_ld(b.rev@, Event::OFFSET_ARCH);
             assert forall |data: &[u8], r: Regs|
                 #![trigger Builder::passes(b.rev@, data, b.rev@.len(), r, body.len(), Event::of(data).nr as u32)]
                 #![trigger Builder::lands(b.rev@, data, b.rev@.len(), r, end as nat)]
@@ -112,7 +112,7 @@ impl Arch {
     }
 }
 
-impl Rule {
+impl<S: Syscall> Rule<S> {
     /// Executable version of [`Rule::active_on`].
     fn is_active_on(&self, arch: Arch) -> (res: bool)
         ensures res == self.active_on(arch)
@@ -171,7 +171,7 @@ impl Action {
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Emits the rules and default return for an architecture token.
     ///
     /// ```text

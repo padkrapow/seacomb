@@ -6,9 +6,9 @@ use crate::spec::policy::*;
 
 verus! {
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// The witness in the nonempty branch of `Policy::eval_chain`.
-    pub(super) open spec fn chain_wins(policies: Seq<Policy>, ev: Event, act: Action, i: int) -> bool {
+    pub(super) open spec fn chain_wins(policies: Seq<Policy<S>>, ev: Event, act: Action, i: int) -> bool {
         &&& 0 <= i < policies.len()
         &&& policies[i].eval(ev, act)
         &&& forall |j: int, other: Action| 0 <= j < policies.len()
@@ -18,7 +18,7 @@ impl Policy {
             }
     }
 
-    pub(super) proof fn lemma_chain_eval_witness(policies: Seq<Policy>, ev: Event, act: Action)
+    pub(super) proof fn lemma_chain_eval_witness(policies: Seq<Policy<S>>, ev: Event, act: Action)
         requires policies.len() != 0, Self::eval_chain(policies, ev, act)
         ensures exists |i: int| #[trigger] Self::chain_wins(policies, ev, act, i)
     {
@@ -37,7 +37,7 @@ impl Policy {
 
     /// Pointwise compilation guarantee using each policy's action witness.
     pub(super) proof fn lemma_eval_chain_compiled_at(
-        policies: Seq<Policy>, filters: Seq<Program>, actions: Seq<Action>,
+        policies: Seq<Policy<S>>, filters: Seq<Program>, actions: Seq<Action>,
         ev: Event, data: &[u8], act: Action,
     )
         requires

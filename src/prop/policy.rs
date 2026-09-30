@@ -5,7 +5,7 @@ use crate::spec::policy::*;
 
 verus! {
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Every event has an action accepted by a well-formed policy.
     pub(super) proof fn lemma_eval_total(self)
         requires self.wf()

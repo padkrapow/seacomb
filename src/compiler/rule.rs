@@ -1,7 +1,7 @@
 //! Compiling one rule: the test that reaches it, and the condition under it.
 
 use vstd::prelude::*;
-use crate::spec::{policy::*, syscall::*, cbpf::*, expr::*};
+use crate::spec::{policy::*, cbpf::*, expr::*};
 use super::CompileError;
 use super::builder::Builder;
 #[allow(unused_imports)]
@@ -44,7 +44,7 @@ impl Arch {
 
     /// Whether argument `n` of a syscall with signature `sig` starts at `slot`.
     pub(super) open spec fn arg_at(self, sig: Seq<PrimType>, n: nat, slot: nat) -> bool {
-        forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX ==>
+        forall |args: Seq<u64>| args.len() == Event::ARG_COUNT_MAX ==>
             #[trigger] self.interp_args(args, sig)[n as int] == self.raw(args, sig[n as int], slot)
     }
 
@@ -145,8 +145,8 @@ impl Arch {
     pub(super) fn arg_slot(self, sig: &[PrimType], n: usize) -> (res: Result<u32, CompileError>)
         requires n < sig@.len()
         ensures res matches Ok(slot) ==> {
-            &&& slot < Rule::ARG_COUNT_MAX
-            &&& self.splits(sig@[n as int]) ==> slot + 1 < Rule::ARG_COUNT_MAX
+            &&& slot < Event::ARG_COUNT_MAX
+            &&& self.splits(sig@[n as int]) ==> slot + 1 < Event::ARG_COUNT_MAX
             &&& self.arg_at(sig@, n as nat, slot as nat)
         }
     {
@@ -154,7 +154,7 @@ impl Arch {
         let mut i: usize = 0;
         proof {
             assert(sig@.skip(0) =~= sig@);
-            assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+            assert forall |args: Seq<u64>| args.len() == Event::ARG_COUNT_MAX implies
                 #[trigger] self.interp_args(args, sig@)[n as int]
                     == self.interp_from(args, sig@.skip(0), 0)[n as int] by {
                 self.lemma_from_start(args, sig@);
@@ -163,8 +163,8 @@ impl Arch {
         while i < n
             invariant
                 i <= n < sig@.len(),
-                slot <= Rule::ARG_COUNT_MAX,
-                forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX ==>
+                slot <= Event::ARG_COUNT_MAX,
+                forall |args: Seq<u64>| args.len() == Event::ARG_COUNT_MAX ==>
                     #[trigger] self.interp_args(args, sig@)[n as int]
                         == self.interp_from(args, sig@.skip(i as int), slot as nat)[n - i],
             decreases n - i
@@ -179,7 +179,7 @@ impl Arch {
                 }
                 slot += 2;
             } else {
-                if slot >= Rule::ARG_COUNT_MAX {
+                if slot >= Event::ARG_COUNT_MAX {
                     return Err(CompileError::SignatureLayout);
                 }
                 slot += 1;
@@ -187,7 +187,7 @@ impl Arch {
             proof {
                 let rest = sig@.skip(i as int);
                 assert(rest.drop_first() =~= sig@.skip(i + 1));
-                assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+                assert forall |args: Seq<u64>| args.len() == Event::ARG_COUNT_MAX implies
                     #[trigger] self.interp_args(args, sig@)[n as int]
                         == self.interp_from(args, sig@.skip(i + 1), slot as nat)[n - i - 1] by {
                     self.lemma_from_next(args, rest, prev as nat, n - i);
@@ -200,12 +200,12 @@ impl Arch {
         if self == Arch::Arm && split && !slot.is_multiple_of(2) {
             slot += 1;
         }
-        if slot >= Rule::ARG_COUNT_MAX || split && slot > 4 {
+        if slot >= Event::ARG_COUNT_MAX || split && slot > 4 {
             return Err(CompileError::SignatureLayout);
         }
         proof {
             let rest = sig@.skip(n as int);
-            assert forall |args: Seq<u64>| args.len() == Rule::ARG_COUNT_MAX implies
+            assert forall |args: Seq<u64>| args.len() == Event::ARG_COUNT_MAX implies
                 #[trigger] self.interp_args(args, sig@)[n as int]
                     == self.raw(args, sig@[n as int], slot as nat) by {
                 self.lemma_from_first(args, rest, unaligned as nat);
@@ -222,14 +222,9 @@ impl Arch {
     }
 }
 
-impl Rule {
-    /// Number of argument slots in `seccomp_data`.
-    pub const ARG_COUNT_MAX: u32 = 6;
-}
-
-impl Rule {
-    /// Emits the test that reaches this rule at syscall number `nr`, and the rule's
-    /// body under it, with multiplexer selector and mask `sel`.
+impl<S: Syscall> Rule<S> {
+    /// Emits the test that reaches this rule at syscall number `nr`, and under it the
+    /// test of `cond` over signature `sig`.
     ///
     /// Forward layout, entered with `A` holding `seccomp_data.nr`:
     ///
@@ -239,27 +234,28 @@ impl Rule {
     ///     ld  [nr]            ; hands A back to the test behind this one
     /// end:
     /// ```
-    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, sel: Option<(u32, u32)>) -> (res: Result<(), CompileError>)
+    fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, cond: &Cond, sig: &[PrimType])
+        -> (res: Result<(), CompileError>)
         requires
-            self.cond.wf(arch, self.syscall.spec_signature(arch)),
+            cond.wf(arch, sig@),
             0 < b.rev@.len(),
             b.wf(),
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
             res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && r.a == Event::of(data).nr as u32 && self.matches_at(arch, nr, sel, Event::of(data)) ==>
+                && r.a == Event::of(data).nr as u32 && self.matches_at(arch, nr, *cond, sig@, Event::of(data)) ==>
                 #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
             res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && r.a == Event::of(data).nr as u32 && !self.matches_at(arch, nr, sel, Event::of(data)) ==>
+                && r.a == Event::of(data).nr as u32 && !self.matches_at(arch, nr, *cond, sig@, Event::of(data)) ==>
                 #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r,
                     old(b).rev@.len(), Event::of(data).nr as u32),
     {
         let end = b.label();
-        b.emit(Instr::LdAbs(Policy::OFFSET_EVENT_NR));
-        proof { Builder::lemma_ld(b.rev@, Policy::OFFSET_EVENT_NR); }
+        b.emit(Instr::LdAbs(Event::OFFSET_NR));
+        proof { Builder::lemma_ld(b.rev@, Event::OFFSET_NR); }
         let ghost r_nr = b.rev@;
-        self.emit_body(b, arch, sel)?;
+        self.emit_body(b, arch, cond, sig)?;
         let ghost r_body = b.rev@;
         b.emit_jump(JmpOp::Eq, Src::K(nr), false, end)?;
         proof {
@@ -267,7 +263,7 @@ impl Rule {
                 #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
                 #![trigger Builder::passes(b.rev@, data, b.rev@.len(), r, end as nat, Event::of(data).nr as u32)]
                 Event::parse(data) is Some && r.wf() && r.a == Event::of(data).nr as u32 implies
-                if self.matches_at(arch, nr, sel, Event::of(data)) {
+                if self.matches_at(arch, nr, *cond, sig@, Event::of(data)) {
                     Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())
                 } else {
                     Builder::passes(b.rev@, data, b.rev@.len(), r, end as nat, Event::of(data).nr as u32)
@@ -276,7 +272,7 @@ impl Rule {
                 Event::lemma_image(data);
                 if ev.nr as u32 == nr {
                     assert(Builder::goes(b.rev@, data, b.rev@.len(), r, r_body.len(), r));
-                    if self.body_holds(arch, sel, ev) {
+                    if cond.holds(arch, sig@, data) {
                         Builder::lemma_then(r_body, b.rev@, data, b.rev@.len(), r, r_body.len(), r,
                             0, self.action.to_ret());
                     } else {
@@ -297,8 +293,7 @@ impl Rule {
         Ok(())
     }
 
-    /// Emits whatever this rule tests beyond the syscall number, then its action: the
-    /// multiplexer selector and mask `sel` if there are any, and the condition otherwise.
+    /// Emits the test of `cond` over signature `sig`, then this rule's action.
     ///
     /// Forward layout, with `end` just past the body:
     ///
@@ -308,31 +303,23 @@ impl Rule {
     ///     ret #action
     /// end:
     /// ```
-    /// With a selector, it is the only test:
-    /// ```text
-    ///     ld  [arg 0]
-    ///     and #mask           ; mask != 0xffffffff
-    ///     jne #selector -> end
-    ///     ret #action
-    /// end:
-    /// ```
-    fn emit_body(&self, b: &mut Builder, arch: Arch, sel: Option<(u32, u32)>) -> (res: Result<(), CompileError>)
+    fn emit_body(&self, b: &mut Builder, arch: Arch, cond: &Cond, sig: &[PrimType])
+        -> (res: Result<(), CompileError>)
         requires
-            self.cond.wf(arch, self.syscall.spec_signature(arch)),
+            cond.wf(arch, sig@),
             0 < b.rev@.len(),
             b.wf(),
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
             final(b).wf(),
             res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && self.body_holds(arch, sel, Event::of(data)) ==>
+                && cond.holds(arch, sig@, data) ==>
                 #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
             res is Ok ==> forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && !self.body_holds(arch, sel, Event::of(data)) ==>
+                && !cond.holds(arch, sig@, data) ==>
                 #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), r, old(b).rev@.len()),
     {
         let end = b.label();
-        let ghost base = b.rev@;
         b.emit(Instr::Ret(RetVal::K(self.action.exec_to_ret())));
         let ghost r_ret = b.rev@;
         proof {
@@ -343,44 +330,8 @@ impl Rule {
             }
         }
 
-        if let Some((arg, mask)) = sel {
-            b.emit_jump(JmpOp::Eq, Src::K(arg), false, end)?;
-            let ghost r_sel = b.rev@;
-            b.emit_load(Policy::OFFSET_EVENT_ARGS, mask);
-            proof {
-                assert forall |data: &[u8], r: Regs|
-                    #![trigger Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())]
-                    #![trigger Builder::lands(b.rev@, data, b.rev@.len(), r, base.len())]
-                    Event::parse(data) is Some && r.wf() implies
-                    if self.body_holds(arch, sel, Event::of(data)) {
-                        Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret())
-                    } else {
-                        Builder::lands(b.rev@, data, b.rev@.len(), r, base.len())
-                    } by {
-                    let arg0 = Event::of(data).args[0];
-                    let w = Builder::word(data, Policy::OFFSET_EVENT_ARGS);
-                    Event::lemma_image(data);
-                    assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * 0) as u32)
-                        == (arg0 & 0xFFFF_FFFF) as u32);
-                    assert((arg0 & (mask as u64)) as u32 == ((arg0 & 0xFFFF_FFFF) as u32) & mask)
-                        by (bit_vector);
-                    let got = Regs { a: w & mask, ..r };
-                    assert(self.body_holds(arch, sel, Event::of(data)) <==> got.a == arg);
-                    let to = if got.a == arg { r_ret.len() } else { end as nat };
-                    assert(Builder::goes(r_sel, data, r_sel.len(), got, to, got));
-                    Builder::lemma_goes_trans(r_sel, b.rev@, data, b.rev@.len(), r, r_sel.len(), got, to, got);
-                    if got.a == arg {
-                        Builder::lemma_then(r_ret, b.rev@, data, b.rev@.len(), r, r_ret.len(), got,
-                            0, self.action.to_ret());
-                    }
-                }
-            }
-            return Ok(());
-        }
-
         let ret = b.label();
-        let sig = self.syscall.signature(arch);
-        let entry = self.cond.emit(b, arch, Ghost(sig@), sig, ret, end)?;
+        let entry = cond.emit(b, arch, Ghost(sig@), sig, ret, end)?;
         let ghost r_cond = b.rev@;
         if entry != b.label() {
             b.emit_goto(entry)?;
@@ -393,9 +344,8 @@ impl Rule {
                 }
             }
             assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && self.body_holds(arch, sel, Event::of(data))
+                && cond.holds(arch, sig@, data)
                 implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret()) by {
-                assert(self.cond.holds(arch, sig@, data));
                 assert(Builder::lands(r_cond, data, entry as nat, r, ret as nat));
                 let m = choose |m: Regs| m.wf()
                     && #[trigger] Builder::goes(r_cond, data, entry as nat, r, ret as nat, m);
@@ -406,9 +356,8 @@ impl Rule {
                     self.action.to_ret());
             }
             assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
-                && !self.body_holds(arch, sel, Event::of(data))
+                && !cond.holds(arch, sig@, data)
                 implies #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), r, end as nat) by {
-                assert(!self.cond.holds(arch, sig@, data));
                 assert(Builder::lands(r_cond, data, entry as nat, r, end as nat));
                 assert(Builder::goes(b.rev@, data, b.rev@.len(), r, entry as nat, r));
                 Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), r, entry as nat, r,
@@ -418,48 +367,11 @@ impl Rule {
         Ok(())
     }
 
-    /// The x86 multiplexer that also reaches this rule, if one does: its syscall number,
-    /// the call number it selects this rule's syscall on, and the mask it reads that with.
-    pub(super) open spec fn spec_mux(&self, arch: Arch) -> Option<(u32, u32, u32)> {
-        let sel = match self.syscall.to_socketcall_arg() {
-            Some(arg) => Some((Syscall::Socketcall, arg, u32::MAX)),
-            None => match self.syscall.to_ipc_arg() {
-                Some(arg) => Some((Syscall::Ipc, arg, 0xFFFFu32)),
-                None => None,
-            },
-        };
-        match sel {
-            Some((mux, arg, mask)) if arch == Arch::X86 && !self.no_mux => match mux.spec_nr(arch) {
-                Some(nr) => Some((nr as u32, arg as u32, mask)),
-                None => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Executable version of [`Rule::spec_mux`].
-    fn mux(&self, arch: Arch) -> (res: Option<(u32, u32, u32)>)
-        ensures res == self.spec_mux(arch)
-    {
-        if arch != Arch::X86 || self.no_mux {
-            return None;
-        }
-        let (mux, arg, mask) = match self.syscall.socketcall_arg() {
-            Some(arg) => (Syscall::Socketcall, arg, u32::MAX),
-            None => (Syscall::Ipc, self.syscall.ipc_arg()?, 0xFFFF),
-        };
-        mux.nr(arch).map(|nr: i32| -> (res: (u32, u32, u32))
-            ensures res == (nr as u32, arg as u32, mask)
-        { (nr as u32, arg as u32, mask) })
-    }
-}
-
-impl Rule {
     /// Emits the direct and multiplexed syscall tests for this rule.
     ///
     /// ```text
     ///     <direct syscall test and argument conditions>
-    ///     <multiplexer test and call-number condition>
+    ///     <multiplexer test and its condition>
     /// ```
     pub(super) fn emit_tests(&self, b: &mut Builder, arch: Arch) -> (res: Result<(), CompileError>)
         requires
@@ -478,12 +390,17 @@ impl Rule {
                     old(b).rev@.len(), Event::of(data).nr as u32),
     {
         let ghost prev = b.rev@;
-        if let Some((nr, arg, mask)) = self.mux(arch) {
-            self.emit(b, arch, nr, Some((arg, mask)))?;
+        if !self.no_mux {
+            if let Some((mux, cond)) = self.syscall.mux(arch) {
+                if let Some(nr) = mux.nr(arch) {
+                    proof { self.syscall.prop_mux_wf(arch); }
+                    self.emit(b, arch, nr as u32, &cond, mux.signature(arch))?;
+                }
+            }
         }
         let ghost mux = b.rev@;
-        if let Some(nr) = self.syscall.bpf_nr(arch) {
-            self.emit(b, arch, nr, None)?;
+        if let Some(nr) = self.syscall.nr(arch) {
+            self.emit(b, arch, nr as u32, &self.cond, self.syscall.signature(arch))?;
         }
         proof {
             assert forall |data: &[u8], r: Regs|
@@ -499,8 +416,8 @@ impl Rule {
                 let nr = ev.nr as u32;
                 Event::lemma_image(data);
                 self.lemma_matches(arch, ev);
-                let own = match self.syscall.spec_bpf_nr(arch) {
-                    Some(n) => self.matches_at(arch, n, None, ev),
+                let own = match self.syscall.spec_nr(arch) {
+                    Some(n) => self.matches_at(arch, n as u32, *self.cond, self.syscall.spec_signature(arch), ev),
                     None => false,
                 };
                 if !own {

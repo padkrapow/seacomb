@@ -42,14 +42,14 @@ fn i32_order() {
     let min = i32::MIN as i64;
     let max = i32::MAX as i64;
     for (rule, expect) in [
-        (rule!({Expect::DENY} getpriority(which, who) if which < 0), [Expect::Denied, Expect::Denied, Expect::Ok, Expect::Errno(libc::EINVAL)]),
-        (rule!({Expect::DENY} getpriority(which, who) if which <= -2), [Expect::Denied, Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
-        (rule!({Expect::DENY} getpriority(which, who) if which > -1), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Denied, Expect::Denied]),
-        (rule!({Expect::DENY} getpriority(which, who) if which >= -1), [Expect::Errno(libc::EINVAL), Expect::Denied, Expect::Denied, Expect::Denied]),
-        (rule!({Expect::DENY} getpriority(which, who) if which >= {min as i32}), [Expect::Denied; 4]),
-        (rule!({Expect::DENY} getpriority(which, who) if which <= {max as i32}), [Expect::Denied; 4]),
-        (rule!({Expect::DENY} getpriority(which, who) if which < {min as i32}), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
-        (rule!({Expect::DENY} getpriority(which, who) if which > {max as i32}), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
+        (rule!({Expect::DENY} getpriority(which, who) if which < 0).unwrap(), [Expect::Denied, Expect::Denied, Expect::Ok, Expect::Errno(libc::EINVAL)]),
+        (rule!({Expect::DENY} getpriority(which, who) if which <= -2).unwrap(), [Expect::Denied, Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
+        (rule!({Expect::DENY} getpriority(which, who) if which > -1).unwrap(), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Denied, Expect::Denied]),
+        (rule!({Expect::DENY} getpriority(which, who) if which >= -1).unwrap(), [Expect::Errno(libc::EINVAL), Expect::Denied, Expect::Denied, Expect::Denied]),
+        (rule!({Expect::DENY} getpriority(which, who) if which >= {min as i32}).unwrap(), [Expect::Denied; 4]),
+        (rule!({Expect::DENY} getpriority(which, who) if which <= {max as i32}).unwrap(), [Expect::Denied; 4]),
+        (rule!({Expect::DENY} getpriority(which, who) if which < {min as i32}).unwrap(), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
+        (rule!({Expect::DENY} getpriority(which, who) if which > {max as i32}).unwrap(), [Expect::Errno(libc::EINVAL), Expect::Errno(libc::EINVAL), Expect::Ok, Expect::Errno(libc::EINVAL)]),
     ] {
         let policy = policy!(default allow on native; {rule}).unwrap();
         for (which, expect) in [i32::MIN as libc::c_long, -1, 0, i32::MAX as libc::c_long].into_iter().zip(expect) {
@@ -495,7 +495,7 @@ fn libc_pread64() {
 /// A length libc's `ftruncate64` splits into words meets a test on the whole length.
 #[test]
 fn libc_ftruncate64() {
-    let syscall = if cfg!(target_pointer_width = "64") { Syscall::Ftruncate } else { Syscall::Ftruncate64 };
+    let syscall = if cfg!(target_pointer_width = "64") { SyscallLinuxV7::Ftruncate } else { SyscallLinuxV7::Ftruncate64 };
     let exact = policy! {
         default allow on native;
         {Expect::DENY} {syscall}(fd, length) if length == 0x1_0000_0002i64;
@@ -561,9 +561,9 @@ fn libc_fallocate64() {
 #[test]
 fn libc_sync_file_range() {
     let (syscall, flags_arg, offset_arg, nbytes_arg) = if cfg!(target_arch = "arm") {
-        (Syscall::ArmSyncFileRange, 1, 2, 3)
+        (SyscallLinuxV7::ArmSyncFileRange, 1, 2, 3)
     } else {
-        (Syscall::SyncFileRange, 3, 1, 2)
+        (SyscallLinuxV7::SyncFileRange, 3, 1, 2)
     };
     let policy = policy! {
         default allow on native;
@@ -589,11 +589,11 @@ fn libc_sync_file_range() {
 #[test]
 fn libc_posix_fadvise64() {
     let (syscall, advice_arg, offset_arg, len_arg) = if cfg!(target_arch = "arm") {
-        (Syscall::ArmFadvise64_64, 1, 2, 3)
+        (SyscallLinuxV7::ArmFadvise64_64, 1, 2, 3)
     } else if cfg!(target_arch = "x86") {
-        (Syscall::Fadvise64_64, 3, 1, 2)
+        (SyscallLinuxV7::Fadvise64_64, 3, 1, 2)
     } else {
-        (Syscall::Fadvise64, 3, 1, 2)
+        (SyscallLinuxV7::Fadvise64, 3, 1, 2)
     };
     // `fadvise64` on x86_64 takes its length as a `size_t`, the others as a `loff_t`.
     let len_ty = syscall.signature(Arch::native().unwrap())[len_arg as usize];
@@ -626,69 +626,69 @@ fn libc_posix_fadvise64() {
 fn native_numbers() {
     let native = Arch::native().unwrap();
     for (syscall, nr) in [
-        (Syscall::Read, libc::SYS_read),
-        (Syscall::Write, libc::SYS_write),
-        (Syscall::Close, libc::SYS_close),
-        (Syscall::Lseek, libc::SYS_lseek),
-        (Syscall::Getpid, libc::SYS_getpid),
-        (Syscall::Getppid, libc::SYS_getppid),
-        (Syscall::Getuid, libc::SYS_getuid),
-        (Syscall::Dup, libc::SYS_dup),
-        (Syscall::Dup3, libc::SYS_dup3),
-        (Syscall::Mprotect, libc::SYS_mprotect),
-        (Syscall::Munmap, libc::SYS_munmap),
-        (Syscall::Madvise, libc::SYS_madvise),
-        (Syscall::Mremap, libc::SYS_mremap),
-        (Syscall::Msync, libc::SYS_msync),
-        (Syscall::Pread64, libc::SYS_pread64),
-        (Syscall::Pwrite64, libc::SYS_pwrite64),
-        (Syscall::Preadv, libc::SYS_preadv),
-        (Syscall::Preadv2, libc::SYS_preadv2),
-        (Syscall::Readahead, libc::SYS_readahead),
-        (Syscall::Fallocate, libc::SYS_fallocate),
-        (Syscall::Ftruncate, libc::SYS_ftruncate),
-        (Syscall::Fchmod, libc::SYS_fchmod),
-        (Syscall::Fchown, libc::SYS_fchown),
-        (Syscall::Fchownat, libc::SYS_fchownat),
-        (Syscall::Fcntl, libc::SYS_fcntl),
-        (Syscall::Ioctl, libc::SYS_ioctl),
-        (Syscall::Prctl, libc::SYS_prctl),
-        (Syscall::Clone, libc::SYS_clone),
-        (Syscall::Futex, libc::SYS_futex),
-        (Syscall::Kill, libc::SYS_kill),
-        (Syscall::Tkill, libc::SYS_tkill),
-        (Syscall::Tgkill, libc::SYS_tgkill),
-        (Syscall::Getpriority, libc::SYS_getpriority),
-        (Syscall::Setpriority, libc::SYS_setpriority),
-        (Syscall::Setresuid, libc::SYS_setresuid),
-        (Syscall::Personality, libc::SYS_personality),
-        (Syscall::Umask, libc::SYS_umask),
-        (Syscall::Wait4, libc::SYS_wait4),
-        (Syscall::Uname, libc::SYS_uname),
-        (Syscall::Exit, libc::SYS_exit),
-        (Syscall::ExitGroup, libc::SYS_exit_group),
-        (Syscall::Socket, libc::SYS_socket),
-        (Syscall::Accept4, libc::SYS_accept4),
-        (Syscall::Sendfile, libc::SYS_sendfile),
-        (Syscall::Splice, libc::SYS_splice),
-        (Syscall::Tee, libc::SYS_tee),
-        (Syscall::EpollPwait, libc::SYS_epoll_pwait),
-        (Syscall::FanotifyMark, libc::SYS_fanotify_mark),
-        (Syscall::ProcessVmReadv, libc::SYS_process_vm_readv),
-        (Syscall::Getrandom, libc::SYS_getrandom),
-        (Syscall::MemfdCreate, libc::SYS_memfd_create),
-        (Syscall::Pipe2, libc::SYS_pipe2),
-        (Syscall::Eventfd2, libc::SYS_eventfd2),
-        (Syscall::Signalfd4, libc::SYS_signalfd4),
-        (Syscall::Setns, libc::SYS_setns),
-        (Syscall::Unshare, libc::SYS_unshare),
-        (Syscall::Brk, libc::SYS_brk),
-        (Syscall::SchedYield, libc::SYS_sched_yield),
-        (Syscall::Getcpu, libc::SYS_getcpu),
+        (SyscallLinuxV7::Read, libc::SYS_read),
+        (SyscallLinuxV7::Write, libc::SYS_write),
+        (SyscallLinuxV7::Close, libc::SYS_close),
+        (SyscallLinuxV7::Lseek, libc::SYS_lseek),
+        (SyscallLinuxV7::Getpid, libc::SYS_getpid),
+        (SyscallLinuxV7::Getppid, libc::SYS_getppid),
+        (SyscallLinuxV7::Getuid, libc::SYS_getuid),
+        (SyscallLinuxV7::Dup, libc::SYS_dup),
+        (SyscallLinuxV7::Dup3, libc::SYS_dup3),
+        (SyscallLinuxV7::Mprotect, libc::SYS_mprotect),
+        (SyscallLinuxV7::Munmap, libc::SYS_munmap),
+        (SyscallLinuxV7::Madvise, libc::SYS_madvise),
+        (SyscallLinuxV7::Mremap, libc::SYS_mremap),
+        (SyscallLinuxV7::Msync, libc::SYS_msync),
+        (SyscallLinuxV7::Pread64, libc::SYS_pread64),
+        (SyscallLinuxV7::Pwrite64, libc::SYS_pwrite64),
+        (SyscallLinuxV7::Preadv, libc::SYS_preadv),
+        (SyscallLinuxV7::Preadv2, libc::SYS_preadv2),
+        (SyscallLinuxV7::Readahead, libc::SYS_readahead),
+        (SyscallLinuxV7::Fallocate, libc::SYS_fallocate),
+        (SyscallLinuxV7::Ftruncate, libc::SYS_ftruncate),
+        (SyscallLinuxV7::Fchmod, libc::SYS_fchmod),
+        (SyscallLinuxV7::Fchown, libc::SYS_fchown),
+        (SyscallLinuxV7::Fchownat, libc::SYS_fchownat),
+        (SyscallLinuxV7::Fcntl, libc::SYS_fcntl),
+        (SyscallLinuxV7::Ioctl, libc::SYS_ioctl),
+        (SyscallLinuxV7::Prctl, libc::SYS_prctl),
+        (SyscallLinuxV7::Clone, libc::SYS_clone),
+        (SyscallLinuxV7::Futex, libc::SYS_futex),
+        (SyscallLinuxV7::Kill, libc::SYS_kill),
+        (SyscallLinuxV7::Tkill, libc::SYS_tkill),
+        (SyscallLinuxV7::Tgkill, libc::SYS_tgkill),
+        (SyscallLinuxV7::Getpriority, libc::SYS_getpriority),
+        (SyscallLinuxV7::Setpriority, libc::SYS_setpriority),
+        (SyscallLinuxV7::Setresuid, libc::SYS_setresuid),
+        (SyscallLinuxV7::Personality, libc::SYS_personality),
+        (SyscallLinuxV7::Umask, libc::SYS_umask),
+        (SyscallLinuxV7::Wait4, libc::SYS_wait4),
+        (SyscallLinuxV7::Uname, libc::SYS_uname),
+        (SyscallLinuxV7::Exit, libc::SYS_exit),
+        (SyscallLinuxV7::ExitGroup, libc::SYS_exit_group),
+        (SyscallLinuxV7::Socket, libc::SYS_socket),
+        (SyscallLinuxV7::Accept4, libc::SYS_accept4),
+        (SyscallLinuxV7::Sendfile, libc::SYS_sendfile),
+        (SyscallLinuxV7::Splice, libc::SYS_splice),
+        (SyscallLinuxV7::Tee, libc::SYS_tee),
+        (SyscallLinuxV7::EpollPwait, libc::SYS_epoll_pwait),
+        (SyscallLinuxV7::FanotifyMark, libc::SYS_fanotify_mark),
+        (SyscallLinuxV7::ProcessVmReadv, libc::SYS_process_vm_readv),
+        (SyscallLinuxV7::Getrandom, libc::SYS_getrandom),
+        (SyscallLinuxV7::MemfdCreate, libc::SYS_memfd_create),
+        (SyscallLinuxV7::Pipe2, libc::SYS_pipe2),
+        (SyscallLinuxV7::Eventfd2, libc::SYS_eventfd2),
+        (SyscallLinuxV7::Signalfd4, libc::SYS_signalfd4),
+        (SyscallLinuxV7::Setns, libc::SYS_setns),
+        (SyscallLinuxV7::Unshare, libc::SYS_unshare),
+        (SyscallLinuxV7::Brk, libc::SYS_brk),
+        (SyscallLinuxV7::SchedYield, libc::SYS_sched_yield),
+        (SyscallLinuxV7::Getcpu, libc::SYS_getcpu),
     ] {
         assert_eq!(syscall.nr(native), Some(nr as _), "{syscall:?} on {native:?}");
     }
-    assert_eq!(Syscall::Skip.nr(native), Some(-1));
+    assert_eq!(SyscallLinuxV7::Skip.nr(native), Some(-1));
 }
 
 /// The native numbers of syscalls only some architectures have match `libc`'s `SYS_*`.
@@ -697,33 +697,33 @@ fn native_numbers_partial() {
     let native = Arch::native().unwrap();
     #[cfg(target_pointer_width = "64")]
     let expected = [
-        (Syscall::Mmap, libc::SYS_mmap),
-        (Syscall::Fadvise64, libc::SYS_fadvise64),
-        (Syscall::SyncFileRange, libc::SYS_sync_file_range),
+        (SyscallLinuxV7::Mmap, libc::SYS_mmap),
+        (SyscallLinuxV7::Fadvise64, libc::SYS_fadvise64),
+        (SyscallLinuxV7::SyncFileRange, libc::SYS_sync_file_range),
     ];
     #[cfg(target_arch = "x86")]
     let expected = [
-        (Syscall::Mmap, libc::SYS_mmap),
-        (Syscall::Mmap2, libc::SYS_mmap2),
-        (Syscall::Fadvise64, libc::SYS_fadvise64),
-        (Syscall::Fadvise64_64, libc::SYS_fadvise64_64),
-        (Syscall::SyncFileRange, libc::SYS_sync_file_range),
-        (Syscall::Ftruncate64, libc::SYS_ftruncate64),
-        (Syscall::Truncate64, libc::SYS_truncate64),
-        (Syscall::Fcntl64, libc::SYS_fcntl64),
-        (Syscall::Chown32, libc::SYS_chown32),
-        (Syscall::Setuid32, libc::SYS_setuid32),
-        (Syscall::Socketcall, libc::SYS_socketcall),
-        (Syscall::Ipc, libc::SYS_ipc),
+        (SyscallLinuxV7::Mmap, libc::SYS_mmap),
+        (SyscallLinuxV7::Mmap2, libc::SYS_mmap2),
+        (SyscallLinuxV7::Fadvise64, libc::SYS_fadvise64),
+        (SyscallLinuxV7::Fadvise64_64, libc::SYS_fadvise64_64),
+        (SyscallLinuxV7::SyncFileRange, libc::SYS_sync_file_range),
+        (SyscallLinuxV7::Ftruncate64, libc::SYS_ftruncate64),
+        (SyscallLinuxV7::Truncate64, libc::SYS_truncate64),
+        (SyscallLinuxV7::Fcntl64, libc::SYS_fcntl64),
+        (SyscallLinuxV7::Chown32, libc::SYS_chown32),
+        (SyscallLinuxV7::Setuid32, libc::SYS_setuid32),
+        (SyscallLinuxV7::Socketcall, libc::SYS_socketcall),
+        (SyscallLinuxV7::Ipc, libc::SYS_ipc),
     ];
     #[cfg(target_arch = "arm")]
     let expected = [
-        (Syscall::Mmap2, libc::SYS_mmap2),
-        (Syscall::Ftruncate64, libc::SYS_ftruncate64),
-        (Syscall::Truncate64, libc::SYS_truncate64),
-        (Syscall::Fcntl64, libc::SYS_fcntl64),
-        (Syscall::Chown32, libc::SYS_chown32),
-        (Syscall::Setuid32, libc::SYS_setuid32),
+        (SyscallLinuxV7::Mmap2, libc::SYS_mmap2),
+        (SyscallLinuxV7::Ftruncate64, libc::SYS_ftruncate64),
+        (SyscallLinuxV7::Truncate64, libc::SYS_truncate64),
+        (SyscallLinuxV7::Fcntl64, libc::SYS_fcntl64),
+        (SyscallLinuxV7::Chown32, libc::SYS_chown32),
+        (SyscallLinuxV7::Setuid32, libc::SYS_setuid32),
     ];
     for (syscall, nr) in expected {
         assert_eq!(syscall.nr(native), Some(nr as _), "{syscall:?} on {native:?}");
@@ -734,16 +734,16 @@ fn native_numbers_partial() {
 #[test]
 fn absent_syscalls() {
     for (syscall, arch) in [
-        (Syscall::Open, Arch::Aarch64),
-        (Syscall::Mmap, Arch::Arm),
-        (Syscall::Mmap2, Arch::X86_64),
-        (Syscall::Ftruncate64, Arch::Aarch64),
-        (Syscall::SyncFileRange, Arch::Arm),
-        (Syscall::ArmSyncFileRange, Arch::X86),
-        (Syscall::Fadvise64, Arch::Arm),
-        (Syscall::Accept, Arch::X86),
-        (Syscall::Socketcall, Arch::X86_64),
-        (Syscall::Ipc, Arch::Arm),
+        (SyscallLinuxV7::Open, Arch::Aarch64),
+        (SyscallLinuxV7::Mmap, Arch::Arm),
+        (SyscallLinuxV7::Mmap2, Arch::X86_64),
+        (SyscallLinuxV7::Ftruncate64, Arch::Aarch64),
+        (SyscallLinuxV7::SyncFileRange, Arch::Arm),
+        (SyscallLinuxV7::ArmSyncFileRange, Arch::X86),
+        (SyscallLinuxV7::Fadvise64, Arch::Arm),
+        (SyscallLinuxV7::Accept, Arch::X86),
+        (SyscallLinuxV7::Socketcall, Arch::X86_64),
+        (SyscallLinuxV7::Ipc, Arch::Arm),
     ] {
         assert_eq!(syscall.nr(arch), None, "{syscall:?} on {arch:?}");
         assert!(syscall.signature(arch).is_empty(), "{syscall:?} on {arch:?}");
@@ -754,44 +754,44 @@ fn absent_syscalls() {
 #[test]
 fn signatures() {
     use PrimType::*;
-    let cases: &[(Syscall, Arch, &[PrimType])] = &[
+    let cases: &[(SyscallLinuxV7, Arch, &[PrimType])] = &[
         // `old_mmap` takes a pointer to its arguments.
-        (Syscall::Mmap, Arch::X86, &[Ptr]),
-        (Syscall::Mmap, Arch::X86_64, &[UWord; 6]),
-        (Syscall::Mmap2, Arch::Arm, &[UWord; 6]),
+        (SyscallLinuxV7::Mmap, Arch::X86, &[Ptr]),
+        (SyscallLinuxV7::Mmap, Arch::X86_64, &[UWord; 6]),
+        (SyscallLinuxV7::Mmap2, Arch::Arm, &[UWord; 6]),
         // `CONFIG_CLONE_BACKWARDS` swaps the last two arguments everywhere but x86_64.
-        (Syscall::Clone, Arch::X86_64, &[UWord, UWord, Ptr, Ptr, UWord]),
-        (Syscall::Clone, Arch::X86, &[UWord, UWord, Ptr, UWord, Ptr]),
-        (Syscall::Clone, Arch::Aarch64, &[UWord, UWord, Ptr, UWord, Ptr]),
+        (SyscallLinuxV7::Clone, Arch::X86_64, &[UWord, UWord, Ptr, Ptr, UWord]),
+        (SyscallLinuxV7::Clone, Arch::X86, &[UWord, UWord, Ptr, UWord, Ptr]),
+        (SyscallLinuxV7::Clone, Arch::Aarch64, &[UWord, UWord, Ptr, UWord, Ptr]),
         // The 16-bit uid calls in `kernel/uid16.c`.
-        (Syscall::Chown, Arch::X86, &[Ptr, U(16), U(16)]),
-        (Syscall::Chown, Arch::Arm, &[Ptr, U(16), U(16)]),
-        (Syscall::Chown, Arch::X86_64, &[Ptr, U(32), U(32)]),
-        (Syscall::Chown32, Arch::X86, &[Ptr, U(32), U(32)]),
-        (Syscall::Setresuid, Arch::X86, &[U(16), U(16), U(16)]),
-        (Syscall::Setresuid, Arch::Aarch64, &[U(32), U(32), U(32)]),
-        (Syscall::Fchown, Arch::Arm, &[U(32), U(16), U(16)]),
+        (SyscallLinuxV7::Chown, Arch::X86, &[Ptr, U(16), U(16)]),
+        (SyscallLinuxV7::Chown, Arch::Arm, &[Ptr, U(16), U(16)]),
+        (SyscallLinuxV7::Chown, Arch::X86_64, &[Ptr, U(32), U(32)]),
+        (SyscallLinuxV7::Chown32, Arch::X86, &[Ptr, U(32), U(32)]),
+        (SyscallLinuxV7::Setresuid, Arch::X86, &[U(16), U(16), U(16)]),
+        (SyscallLinuxV7::Setresuid, Arch::Aarch64, &[U(32), U(32), U(32)]),
+        (SyscallLinuxV7::Fchown, Arch::Arm, &[U(32), U(16), U(16)]),
         // `loff_t` stays one 64-bit argument on 32-bit architectures.
-        (Syscall::Pread64, Arch::X86, &[U(32), Ptr, UWord, I(64)]),
-        (Syscall::Pread64, Arch::Arm, &[U(32), Ptr, UWord, I(64)]),
-        (Syscall::Ftruncate64, Arch::X86, &[U(32), I(64)]),
-        (Syscall::Truncate64, Arch::Arm, &[Ptr, I(64)]),
-        (Syscall::FanotifyMark, Arch::Arm, &[I(32), U(32), U(64), I(32), Ptr]),
+        (SyscallLinuxV7::Pread64, Arch::X86, &[U(32), Ptr, UWord, I(64)]),
+        (SyscallLinuxV7::Pread64, Arch::Arm, &[U(32), Ptr, UWord, I(64)]),
+        (SyscallLinuxV7::Ftruncate64, Arch::X86, &[U(32), I(64)]),
+        (SyscallLinuxV7::Truncate64, Arch::Arm, &[Ptr, I(64)]),
+        (SyscallLinuxV7::FanotifyMark, Arch::Arm, &[I(32), U(32), U(64), I(32), Ptr]),
         // `off_t` and `size_t` are words.
-        (Syscall::Ftruncate, Arch::X86, &[U(32), IWord]),
-        (Syscall::Lseek, Arch::Aarch64, &[U(32), IWord, U(32)]),
-        (Syscall::Read, Arch::Arm, &[U(32), Ptr, UWord]),
+        (SyscallLinuxV7::Ftruncate, Arch::X86, &[U(32), IWord]),
+        (SyscallLinuxV7::Lseek, Arch::Aarch64, &[U(32), IWord, U(32)]),
+        (SyscallLinuxV7::Read, Arch::Arm, &[U(32), Ptr, UWord]),
         // arm64 has only `fadvise64_64`, under the `fadvise64` name.
-        (Syscall::Fadvise64, Arch::X86_64, &[I(32), I(64), UWord, I(32)]),
-        (Syscall::Fadvise64, Arch::Aarch64, &[I(32), I(64), I(64), I(32)]),
-        (Syscall::Fadvise64_64, Arch::X86, &[I(32), I(64), I(64), I(32)]),
+        (SyscallLinuxV7::Fadvise64, Arch::X86_64, &[I(32), I(64), UWord, I(32)]),
+        (SyscallLinuxV7::Fadvise64, Arch::Aarch64, &[I(32), I(64), I(64), I(32)]),
+        (SyscallLinuxV7::Fadvise64_64, Arch::X86, &[I(32), I(64), I(64), I(32)]),
         // ARM moves the `int` arguments ahead of the `loff_t` ones.
-        (Syscall::ArmFadvise64_64, Arch::Arm, &[I(32), I(32), I(64), I(64)]),
-        (Syscall::ArmSyncFileRange, Arch::Arm, &[I(32), U(32), I(64), I(64)]),
-        (Syscall::SyncFileRange, Arch::X86, &[I(32), I(64), I(64), U(32)]),
-        (Syscall::Socketcall, Arch::X86, &[I(32), Ptr]),
-        (Syscall::Getpid, Arch::Arm, &[]),
-        (Syscall::Skip, Arch::X86_64, &[]),
+        (SyscallLinuxV7::ArmFadvise64_64, Arch::Arm, &[I(32), I(32), I(64), I(64)]),
+        (SyscallLinuxV7::ArmSyncFileRange, Arch::Arm, &[I(32), U(32), I(64), I(64)]),
+        (SyscallLinuxV7::SyncFileRange, Arch::X86, &[I(32), I(64), I(64), U(32)]),
+        (SyscallLinuxV7::Socketcall, Arch::X86, &[I(32), Ptr]),
+        (SyscallLinuxV7::Getpid, Arch::Arm, &[]),
+        (SyscallLinuxV7::Skip, Arch::X86_64, &[]),
     ];
     for &(syscall, arch, sig) in cases {
         assert_eq!(syscall.signature(arch), sig, "{syscall:?} on {arch:?}");
@@ -868,9 +868,9 @@ fn literal_types() {
 #[test]
 fn unsigned_types() {
     for (syscall, i, ty, signed) in [
-        (Syscall::Dup, 0, U(32), I(32)),
-        (Syscall::Fchmod, 1, U(16), I(16)),
-        (Syscall::Setresuid, 2, U(16), I(16)),
+        (SyscallLinuxV7::Dup, 0, U(32), I(32)),
+        (SyscallLinuxV7::Fchmod, 1, U(16), I(16)),
+        (SyscallLinuxV7::Setresuid, 2, U(16), I(16)),
     ] {
         for lty in [ty, U(64), I(64)] {
             assert!(policy! {
@@ -890,7 +890,7 @@ fn unsigned_types() {
 #[test]
 fn word_types() {
     // `off_t` is a signed word, which a `u32` fits only where the word is wider.
-    let above = rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32);
+    let above = rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32).unwrap();
     assert!(policy!(default allow on x86_64, aarch64; {above.clone()}).is_ok());
     assert!(matches!(
         policy!(default allow on x86_64, x86; {above}),
@@ -923,7 +923,7 @@ fn wide_types() {
             {Expect::DENY} pread64(fd, buf, count, offset) if offset < 1 as ty;
         }.is_ok(), "{ty:?}");
     }
-    let range = rule!({Expect::DENY} fallocate(fd, mode, offset, len) if offset >= 0x8000_0000i64 && len <= -1i64);
+    let range = rule!({Expect::DENY} fallocate(fd, mode, offset, len) if offset >= 0x8000_0000i64 && len <= -1i64).unwrap();
     assert!(policy!(default allow on x86, x86_64, arm, aarch64; {range}).is_ok());
     assert!(policy! {
         default allow on x86, arm;
@@ -963,10 +963,10 @@ fn mask_types() {
 #[test]
 fn ptr_ops() {
     for (on_ptr, on_ints) in [
-        (rule!({Expect::DENY} uname(buf) if buf < 0 as ptr), rule!({Expect::DENY} read(fd, buf, count) if fd < 0u32 && count < 0usize)),
-        (rule!({Expect::DENY} uname(buf) if buf <= 0 as ptr), rule!({Expect::DENY} read(fd, buf, count) if fd <= 0u32 && count <= 0usize)),
-        (rule!({Expect::DENY} uname(buf) if buf > 0 as ptr), rule!({Expect::DENY} read(fd, buf, count) if fd > 0u32 && count > 0usize)),
-        (rule!({Expect::DENY} uname(buf) if buf >= 0 as ptr), rule!({Expect::DENY} read(fd, buf, count) if fd >= 0u32 && count >= 0usize)),
+        (rule!({Expect::DENY} uname(buf) if buf < 0 as ptr).unwrap(), rule!({Expect::DENY} read(fd, buf, count) if fd < 0u32 && count < 0usize).unwrap()),
+        (rule!({Expect::DENY} uname(buf) if buf <= 0 as ptr).unwrap(), rule!({Expect::DENY} read(fd, buf, count) if fd <= 0u32 && count <= 0usize).unwrap()),
+        (rule!({Expect::DENY} uname(buf) if buf > 0 as ptr).unwrap(), rule!({Expect::DENY} read(fd, buf, count) if fd > 0u32 && count > 0usize).unwrap()),
+        (rule!({Expect::DENY} uname(buf) if buf >= 0 as ptr).unwrap(), rule!({Expect::DENY} read(fd, buf, count) if fd >= 0u32 && count >= 0usize).unwrap()),
     ] {
         assert!(matches!(
             policy!(default allow on x86_64; {on_ptr}),
@@ -983,9 +983,9 @@ fn ptr_ops() {
         Err(Error::Check(CheckError::BinOpTypes { op: BinOp::Add, lhs: Ptr, rhs: Ptr, .. })),
     ));
     for rule in [
-        rule!({Expect::DENY} uname(buf) if buf == 0 as ptr),
-        rule!({Expect::DENY} uname(buf) if buf != 0 as ptr),
-        rule!({Expect::DENY} uname(buf) if buf as usize & 0xfffusize == 0usize),
+        rule!({Expect::DENY} uname(buf) if buf == 0 as ptr).unwrap(),
+        rule!({Expect::DENY} uname(buf) if buf != 0 as ptr).unwrap(),
+        rule!({Expect::DENY} uname(buf) if buf as usize & 0xfffusize == 0usize).unwrap(),
     ] {
         assert!(policy!(default allow on x86; {rule}).is_ok());
     }
@@ -995,12 +995,12 @@ fn ptr_ops() {
 #[test]
 fn arg_count() {
     for (syscall, arch, total) in [
-        (Syscall::Mmap2, Arch::X86, 6),
-        (Syscall::Mmap, Arch::X86, 1),
-        (Syscall::Clone, Arch::X86_64, 5),
-        (Syscall::Pread64, Arch::Arm, 4),
-        (Syscall::SyncFileRange, Arch::X86, 4),
-        (Syscall::Uname, Arch::Aarch64, 1),
+        (SyscallLinuxV7::Mmap2, Arch::X86, 6),
+        (SyscallLinuxV7::Mmap, Arch::X86, 1),
+        (SyscallLinuxV7::Clone, Arch::X86_64, 5),
+        (SyscallLinuxV7::Pread64, Arch::Arm, 4),
+        (SyscallLinuxV7::SyncFileRange, Arch::X86, 4),
+        (SyscallLinuxV7::Uname, Arch::Aarch64, 1),
     ] {
         assert!(policy! {
             default allow on {arch};
@@ -1035,12 +1035,12 @@ fn absent_syscall_rule() {
 #[test]
 fn incompat_sigs() {
     for (syscall, archs) in [
-        (Syscall::Clone, [Arch::X86_64, Arch::Aarch64]),
-        (Syscall::Clone, [Arch::X86, Arch::X86_64]),
-        (Syscall::Chown, [Arch::X86, Arch::X86_64]),
-        (Syscall::Setresuid, [Arch::Arm, Arch::Aarch64]),
-        (Syscall::Fadvise64, [Arch::X86_64, Arch::Aarch64]),
-        (Syscall::Chown32, [Arch::Arm, Arch::X86_64]),
+        (SyscallLinuxV7::Clone, [Arch::X86_64, Arch::Aarch64]),
+        (SyscallLinuxV7::Clone, [Arch::X86, Arch::X86_64]),
+        (SyscallLinuxV7::Chown, [Arch::X86, Arch::X86_64]),
+        (SyscallLinuxV7::Setresuid, [Arch::Arm, Arch::Aarch64]),
+        (SyscallLinuxV7::Fadvise64, [Arch::X86_64, Arch::Aarch64]),
+        (SyscallLinuxV7::Chown32, [Arch::Arm, Arch::X86_64]),
     ] {
         assert!(policy!(default allow on {archs[0]}, {archs[1]}; {Expect::DENY} {syscall}()).is_ok(), "{syscall:?}");
         assert!(matches!(
@@ -1049,10 +1049,10 @@ fn incompat_sigs() {
         ), "{syscall:?}");
     }
     for (syscall, archs) in [
-        (Syscall::Clone, [Arch::X86, Arch::Aarch64]),
-        (Syscall::Chown, [Arch::X86, Arch::Arm]),
-        (Syscall::Fadvise64, [Arch::X86, Arch::X86_64]),
-        (Syscall::Pread64, [Arch::X86, Arch::Aarch64]),
+        (SyscallLinuxV7::Clone, [Arch::X86, Arch::Aarch64]),
+        (SyscallLinuxV7::Chown, [Arch::X86, Arch::Arm]),
+        (SyscallLinuxV7::Fadvise64, [Arch::X86, Arch::X86_64]),
+        (SyscallLinuxV7::Pread64, [Arch::X86, Arch::Aarch64]),
     ] {
         assert!(policy! {
             default allow on {archs[0]}, {archs[1]};
@@ -1065,9 +1065,9 @@ fn incompat_sigs() {
 #[test]
 fn incompat_sigs_on_archs() {
     for (syscall, archs) in [
-        (Syscall::Clone, [Arch::X86_64, Arch::Aarch64]),
-        (Syscall::Chown, [Arch::X86, Arch::X86_64]),
-        (Syscall::Setresuid, [Arch::Arm, Arch::Aarch64]),
+        (SyscallLinuxV7::Clone, [Arch::X86_64, Arch::Aarch64]),
+        (SyscallLinuxV7::Chown, [Arch::X86, Arch::X86_64]),
+        (SyscallLinuxV7::Setresuid, [Arch::Arm, Arch::Aarch64]),
     ] {
         let mut policy = policy! {
             default allow on {archs[0]}, {archs[1]};
@@ -1076,16 +1076,16 @@ fn incompat_sigs_on_archs() {
             [{archs[1]}] {Expect::DENY} exact {syscall}() if @0 == @0;
         }.unwrap();
         assert!(matches!(
-            policy.add(rule!([{archs[0]}, {archs[1]}] {Expect::DENY} {syscall}() if @0 == @0)),
+            policy.add(rule!([{archs[0]}, {archs[1]}] {Expect::DENY} {syscall}() if @0 == @0).unwrap()),
             Err(Error::Check(CheckError::IncompatSigs)),
         ), "{syscall:?}");
     }
     let mut policy = policy!(default allow on x86_64, aarch64; {Expect::DENY} getpid()).unwrap();
     assert!(matches!(
-        policy.add(rule!([aarch64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)),
+        policy.add(rule!([aarch64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname).unwrap()),
         Err(Error::Check(CheckError::InvalidArg { given: 0, total: 0 })),
     ));
-    policy.add(rule!([x86_64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname)).unwrap();
+    policy.add(rule!([x86_64] {Expect::DENY} open(pathname, flags, mode) if pathname == pathname).unwrap()).unwrap();
 }
 
 /// Adding an architecture leaves alone the rules limited to other architectures.
@@ -1110,7 +1110,7 @@ fn add_arch_rechecks() {
     policy.add_arch(Arch::Arm).unwrap();
 
     let mut policy = Policy::new(Action::Allow).unwrap();
-    policy.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32)).unwrap();
+    policy.add(rule!({Expect::DENY} lseek(fd, offset, whence) if offset == 0x8000_0000u32).unwrap()).unwrap();
     policy.add_arch(Arch::X86_64).unwrap();
     assert!(matches!(
         policy.add_arch(Arch::X86),
@@ -1119,16 +1119,16 @@ fn add_arch_rechecks() {
     policy.add_arch(Arch::Aarch64).unwrap();
 }
 
-/// Multiplexed syscalls take argument tests only in exact rules.
+/// Multiplexed syscalls take argument tests only in exact rules, on an arch that multiplexes them.
 #[test]
 fn mux_conds() {
-    for syscall in [Syscall::Socket, Syscall::Accept4, Syscall::Semget, Syscall::Shmat] {
-        let mut policy = policy!(default allow on native).unwrap();
+    for syscall in [SyscallLinuxV7::Socket, SyscallLinuxV7::Accept4, SyscallLinuxV7::Semget, SyscallLinuxV7::Shmat] {
+        let mut policy = policy!(default allow on native, x86).unwrap();
         assert!(matches!(
-            policy.add(rule!({Expect::DENY} {syscall}() if @0 == @0)),
+            policy.add(rule!({Expect::DENY} {syscall}() if @0 == @0).unwrap()),
             Err(Error::Check(CheckError::InvalidMuxConditions)),
         ), "{syscall:?}");
-        policy.add(rule!({Expect::DENY} {syscall}())).unwrap();
-        policy.add(rule!({Expect::DENY} exact {syscall}() if @0 == @0)).unwrap();
+        policy.add(rule!({Expect::DENY} {syscall}()).unwrap()).unwrap();
+        policy.add(rule!({Expect::DENY} exact {syscall}() if @0 == @0).unwrap()).unwrap();
     }
 }

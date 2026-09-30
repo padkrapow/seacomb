@@ -6,14 +6,14 @@ use super::*;
 #[test]
 fn actions() {
     for (rule, expect) in [
-        (rule!(allow getpid()), Expect::Ok),
-        (rule!(log getpid()), Expect::Ok),
-        (rule!(errno(4095) getpid()), Expect::Errno(4095)),
-        (rule!(trace(u16::MAX) getpid()), Expect::Errno(libc::ENOSYS)),
-        (rule!(notify getpid()), Expect::Errno(libc::ENOSYS)),
-        (rule!(trap(u16::MAX) getpid()), Expect::Sigsys),
-        (rule!(kill_thread getpid()), Expect::Sigsys),
-        (rule!(kill getpid()), Expect::Sigsys),
+        (rule!(allow getpid()).unwrap(), Expect::Ok),
+        (rule!(log getpid()).unwrap(), Expect::Ok),
+        (rule!(errno(4095) getpid()).unwrap(), Expect::Errno(4095)),
+        (rule!(trace(u16::MAX) getpid()).unwrap(), Expect::Errno(libc::ENOSYS)),
+        (rule!(notify getpid()).unwrap(), Expect::Errno(libc::ENOSYS)),
+        (rule!(trap(u16::MAX) getpid()).unwrap(), Expect::Sigsys),
+        (rule!(kill_thread getpid()).unwrap(), Expect::Sigsys),
+        (rule!(kill getpid()).unwrap(), Expect::Sigsys),
     ] {
         let policy = policy!(default allow on native; {rule}).unwrap();
         unsafe { policy.install_and_check(libc::SYS_getpid, [0; 6], expect) };
@@ -39,9 +39,9 @@ fn default_action() {
 fn failed_add_keeps_rules() {
     let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
     for rule in [
-        rule!(errno(4096) getppid()),
-        rule!(errno(8) getppid() if {Expr::Var(u32::MAX)} == {Expr::Var(u32::MAX)}),
-        rule!(errno(8) getppid() if @0 == @0 && {Expr::Var(6)} == {Expr::Var(6)}),
+        rule!(errno(4096) getppid()).unwrap(),
+        rule!(errno(8) getppid() if {Expr::Var(u32::MAX)} == {Expr::Var(u32::MAX)}).unwrap(),
+        rule!(errno(8) getppid() if @0 == @0 && {Expr::Var(6)} == {Expr::Var(6)}).unwrap(),
     ] {
         assert!(policy.add(rule).is_err());
     }
@@ -122,11 +122,11 @@ fn signed_arg() {
 /// A rule's argument tests must all hold, whatever order they were given in.
 #[test]
 fn six_conds() {
-    let sig = Syscall::ProcessVmReadv.signature(Arch::native().unwrap());
+    let sig = SyscallLinuxV7::ProcessVmReadv.signature(Arch::native().unwrap());
     let &[t0, t1, t2, t3, t4, t5] = sig else { panic!("{sig:?}") };
     // Inside `policy!`, this condition would pass the default `recursion_limit`.
     let mut policy = Policy::new_native(Action::Allow).unwrap();
-    policy.add(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0)).unwrap();
+    policy.add(rule!({Expect::DENY} process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) if flags == 6 as t5 && riovcnt == 5 as t4 && remote_iov == 4 as t3 && liovcnt == 3 as t2 && local_iov == 2 as t1 && pid == 1 as t0).unwrap()).unwrap();
     unsafe {
         policy.install_and_check(libc::SYS_process_vm_readv, [1, 2, 3, 4, 5, 6], Expect::Denied);
         policy.install_and_check(libc::SYS_process_vm_readv, [2, 2, 3, 4, 5, 6], Expect::Errno(libc::EINVAL));
@@ -328,7 +328,7 @@ fn unsigned_arg() {
 /// A policy without architectures is refused before anything is installed.
 #[test]
 fn no_arch() {
-    let mut policy = Policy::new(Action::Allow).unwrap();
+    let mut policy = Policy::<SyscallLinuxV7>::new(Action::Allow).unwrap();
     policy.on_bad_arch(Action::KillProcess).unwrap();
     assert!(matches!(policy.install(), Err(Error::NoArch)));
 }
@@ -353,7 +353,7 @@ fn x86_64_x32() {
     }
 }
 
-/// On x86_64, a rule on `Syscall::Skip` matches syscall number -1 rather than the x32 action.
+/// On x86_64, a rule on `SyscallLinuxV7::Skip` matches syscall number -1 rather than the x32 action.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[test]
 fn x86_64_skip() {
@@ -469,9 +469,9 @@ fn rule_on_archs_checks() {
     let native = Arch::native().unwrap();
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
     let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
-    policy.add(rule!([{other}] {Expect::DENY} getppid())).unwrap();
-    policy.add(rule!([{native}, {other}] {Expect::DENY} exact getuid())).unwrap();
-    let mut twice = rule!([{native}] {Expect::DENY} getppid());
+    policy.add(rule!([{other}] {Expect::DENY} getppid()).unwrap()).unwrap();
+    policy.add(rule!([{native}, {other}] {Expect::DENY} exact getuid()).unwrap()).unwrap();
+    let mut twice = rule!([{native}] {Expect::DENY} getppid()).unwrap();
     twice.archs.push(native);
     assert!(matches!(policy.add(twice), Err(Error::Check(CheckError::DuplicateArch))));
     unsafe {
@@ -484,7 +484,7 @@ fn rule_on_archs_checks() {
 /// A native policy already has the native architecture, keeps it once, and takes every other one.
 #[test]
 fn new_native() {
-    let mut policy = Policy::new_native(Action::Errno(7)).unwrap();
+    let mut policy = Policy::<SyscallLinuxV7>::new_native(Action::Errno(7)).unwrap();
     let native = Arch::native().unwrap();
     policy.add_arch(native).unwrap();
     assert_eq!(policy.archs, [native]);
@@ -494,7 +494,7 @@ fn new_native() {
         }
     }
     assert!(matches!(
-        Policy::new_native(Action::Errno(4096)),
+        Policy::<SyscallLinuxV7>::new_native(Action::Errno(4096)),
         Err(Error::Check(CheckError::InvalidErrno(_)))
     ));
 }
@@ -515,11 +515,11 @@ fn rule_payloads() {
 #[test]
 fn payload_limits() {
     for rule in [
-        rule!(errno(0) getpid()),
-        rule!(errno(4094) getpid()),
-        rule!(errno(4095) getpid()),
-        rule!(trace(u16::MAX) getpid()),
-        rule!(trap(u16::MAX) getpid()),
+        rule!(errno(0) getpid()).unwrap(),
+        rule!(errno(4094) getpid()).unwrap(),
+        rule!(errno(4095) getpid()).unwrap(),
+        rule!(trace(u16::MAX) getpid()).unwrap(),
+        rule!(trap(u16::MAX) getpid()).unwrap(),
     ] {
         policy!(default allow on native; {rule}).unwrap();
     }
@@ -559,7 +559,7 @@ fn arg_out_of_range() {
     ));
 }
 
-/// A rule on `Syscall::Skip` is allowed, but not with argument tests.
+/// A rule on `SyscallLinuxV7::Skip` is allowed, but not with argument tests.
 #[test]
 fn skip_rule() {
     assert!(policy!(default allow on native; errno(1) skip()).is_ok());
@@ -620,7 +620,7 @@ fn errno_edges() {
 fn long_chain() {
     let mut policy = policy!(default allow on native).unwrap();
     for i in 0..300 {
-        policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
+        policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize}).unwrap()).unwrap();
     }
     let fd = libc::c_ulong::MAX;
     unsafe {
@@ -637,7 +637,7 @@ fn long_chain() {
 fn too_large() {
     let mut policy = policy!(default allow on native).unwrap();
     for i in 0..4096 {
-        policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize})).unwrap();
+        policy.add(rule!({Expect::DENY} read(fd, buf, count) if count == {i as usize}).unwrap()).unwrap();
     }
     let before = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
     assert!(matches!(policy.install(), Err(Error::FilterTooLarge)));

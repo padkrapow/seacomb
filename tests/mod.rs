@@ -5,6 +5,7 @@
 
 mod cond;
 mod filter;
+mod syscall;
 
 use seacomb::*;
 use seacomb::PrimType::*;
@@ -52,7 +53,7 @@ trait PolicyExt {
     unsafe fn install_and_check(&self, nr: libc::c_long, args: [libc::c_ulong; 6], expect: Expect);
 }
 
-impl PolicyExt for Policy {
+impl<S: Syscall + std::fmt::Debug> PolicyExt for Policy<S> {
     unsafe fn install_and_run<A: Copy>(&self, call: impl FnOnce() -> A) -> Result<A, libc::c_int> {
         // The child hands back its result through shared memory, since the filter may deny any syscall to do it with.
         let size = std::mem::size_of::<A>().max(1);

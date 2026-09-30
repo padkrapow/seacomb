@@ -15,15 +15,17 @@ mod compiler;
 mod display;
 mod macros;
 mod spec;
+mod syscall;
 pub mod prop;
 
 use vstd::prelude::*;
 
 pub use crate::compiler::CompileError;
 pub use crate::check::CheckError;
-pub use crate::spec::{policy::*, syscall::*, expr::*};
+pub use crate::spec::{policy::*, expr::*};
 pub use crate::spec::cbpf;
 pub use crate::macros::{ToExpr, ToCond};
+pub use crate::syscall::*;
 
 verus! {
 
@@ -32,6 +34,9 @@ verus! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// A rule names a syscall that the syscall table lacks.
+    #[error("unknown syscall `{0}`")]
+    UnknownSyscall(&'static str),
     /// The policy fails a well-formedness check.
     #[error("failed to validate the policy")]
     Check(#[source] CheckError),
@@ -72,9 +77,9 @@ impl Arch {
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Creates a policy with default action `act_no_match` and no architectures enabled.
-    pub fn new(act_no_match: Action) -> (res: Result<Policy, Error>)
+    pub fn new(act_no_match: Action) -> (res: Result<Self, Error>)
         ensures res matches Ok(p) ==> {
             &&& p.wf()
             &&& p.act_no_match == act_no_match
@@ -95,7 +100,7 @@ impl Policy {
     }
 
     /// Creates a policy over the running architecture with default action `act_no_match`.
-    pub fn new_native(act_no_match: Action) -> (res: Result<Policy, Error>)
+    pub fn new_native(act_no_match: Action) -> (res: Result<Self, Error>)
         ensures res matches Ok(p) ==> {
             &&& p.wf()
             &&& p.act_no_match == act_no_match
@@ -177,7 +182,7 @@ impl Policy {
     }
 
     /// Adds `rule` after the rules already in this policy.
-    pub fn add(&mut self, rule: Rule) -> (res: Result<(), Error>)
+    pub fn add(&mut self, rule: Rule<S>) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
             final(self).wf(),
@@ -272,7 +277,7 @@ impl InstallFlags {
 }
 
 #[cfg(target_os = "linux")]
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Compiles this policy and installs it on the calling thread with the default flags.
     pub fn install(&self) -> Result<(), Error> {
         self.install_with_flags(InstallFlags::default())

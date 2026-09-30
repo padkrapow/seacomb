@@ -326,7 +326,7 @@ impl Arch {
         }
     {
         let at = self.arg_slot(sig, n)?;
-        let lo = Policy::OFFSET_EVENT_ARGS + 8 * at;
+        let lo = Event::OFFSET_ARGS + 8 * at;
         let hi = if self.exec_splits(sig[n]) { lo + 8 } else { lo + 4 };
         proof {
             assert forall |data: &[u8]|
@@ -344,15 +344,15 @@ impl Arch {
                 self.lemma_raw_words(ev.args, sig@[n as int], at as nat);
                 let lv = ev.args[at as int];
                 assert((lv & 0xFFFF_FFFF) as u32 == lv as u32) by (bit_vector);
-                assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * at) as u32)
+                assert(Builder::word(data, (Event::OFFSET_ARGS + 8 * at) as u32)
                     == (ev.args[at as int] & 0xFFFF_FFFF) as u32);
                 if self.splits(sig@[n as int]) {
                     let hv = ev.args[at + 1 as int];
                     assert((hv & 0xFFFF_FFFF) as u32 == hv as u32) by (bit_vector);
-                    assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * (at + 1)) as u32)
+                    assert(Builder::word(data, (Event::OFFSET_ARGS + 8 * (at + 1)) as u32)
                         == (ev.args[at + 1 as int] & 0xFFFF_FFFF) as u32);
                 } else {
-                    assert(Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * at + 4) as u32)
+                    assert(Builder::word(data, (Event::OFFSET_ARGS + 8 * at + 4) as u32)
                         == (ev.args[at as int] >> 32) as u32);
                 }
             }

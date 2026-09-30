@@ -9,7 +9,6 @@ mod eval;
 mod expr;
 mod machine;
 mod rule;
-mod syscall;
 mod value;
 mod words;
 
@@ -35,7 +34,7 @@ pub enum CompileError {
     ScratchOverflow,
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Compiles the policy into a filter program.
     #[cfg_attr(not(target_os = "linux"), allow(unused))]
     pub(crate) fn to_cbpf(&self) -> (res: Result<Program, CompileError>)

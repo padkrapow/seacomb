@@ -227,7 +227,7 @@ impl Arch {
     }
 }
 
-impl Rule {
+impl<S: Syscall> Rule<S> {
     /// Checks the rule against each architecture it lists, or every enabled one if it lists none.
     pub(crate) fn check(&self, archs: &[Arch]) -> (res: Result<(), CheckError>)
         ensures res is Ok ==> self.wf(archs@)
@@ -243,7 +243,8 @@ impl Rule {
         ensures res is Ok ==> {
             &&& forall |k: int| 0 <= k < archs@.len() ==>
                     self.cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k]))
-            &&& !self.no_mux && self.syscall.can_mux() ==> *self.cond == Cond::True
+            &&& forall |k: int| 0 <= k < archs@.len() ==>
+                    !self.no_mux && self.syscall.spec_mux(#[trigger] archs@[k]) is Some ==> *self.cond == Cond::True
             &&& forall |k: int, l: int| #![trigger archs@[k], archs@[l]]
                     0 <= k < l < archs@.len() &&
                     self.syscall.spec_signature(archs@[k]) != self.syscall.spec_signature(archs@[l])
@@ -252,9 +253,6 @@ impl Rule {
     {
         let cond = &*self.cond;
         let constrained = !matches!(cond, Cond::True);
-        if constrained && !self.no_mux && (self.syscall.socketcall_arg().is_some() || self.syscall.ipc_arg().is_some()) {
-            return Err(CheckError::InvalidMuxConditions);
-        }
         if archs.is_empty() {
             return Ok(());
         }
@@ -271,9 +269,14 @@ impl Rule {
                     self.syscall.spec_signature(#[trigger] archs@[k]) =~= first@,
                 forall |k: int| 0 <= k < i ==>
                     cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k])),
+                forall |k: int| 0 <= k < i ==>
+                    !self.no_mux && self.syscall.spec_mux(#[trigger] archs@[k]) is Some ==> *self.cond == Cond::True,
             decreases archs@.len() - i
         {
             let arch = archs[i];
+            if constrained && !self.no_mux && self.syscall.mux(arch).is_some() {
+                return Err(CheckError::InvalidMuxConditions);
+            }
             let sig = self.syscall.signature(arch);
             if constrained {
                 if sig.len() != first.len() {
@@ -314,7 +317,7 @@ impl Rule {
     }
 }
 
-impl Policy {
+impl<S: Syscall> Policy<S> {
     /// Checks the policy's actions, its architectures, and every rule against them.
     #[cfg_attr(not(target_os = "linux"), allow(unused))]
     pub(crate) fn check(&self) -> (res: Result<(), CheckError>)

@@ -8,18 +8,19 @@ use super::builder::Builder;
 
 verus! {
 
-impl Policy {
+impl Event {
     /// Byte offset of `seccomp_data.nr`.
-    pub(super) const OFFSET_EVENT_NR: u32 = 0;
+    pub(super) const OFFSET_NR: u32 = 0;
 
     /// Byte offset of `seccomp_data.arch`.
-    pub(super) const OFFSET_EVENT_ARCH: u32 = 4;
+    pub(super) const OFFSET_ARCH: u32 = 4;
 
     /// Byte offset of the low half of `seccomp_data.args[0]`.
-    pub(super) const OFFSET_EVENT_ARGS: u32 = 16;
-}
+    pub(super) const OFFSET_ARGS: u32 = 16;
 
-impl Event {
+    /// Number of argument slots in `seccomp_data`.
+    pub const ARG_COUNT_MAX: u32 = 6;
+
     /// The event the 64-byte image `data` describes.
     pub(super) open spec fn of(data: &[u8]) -> Event {
         Event::parse(data)->Some_0
@@ -29,31 +30,31 @@ impl Event {
     pub(super) proof fn lemma_image(data: &[u8])
         requires Event::parse(data) is Some
         ensures
-            Self::of(data).args.len() == Rule::ARG_COUNT_MAX,
-            Builder::word(data, Policy::OFFSET_EVENT_NR) == Self::of(data).nr as u32,
-            Builder::word(data, Policy::OFFSET_EVENT_ARCH) == Self::of(data).arch,
-            forall |k: u32| k < Rule::ARG_COUNT_MAX ==>
-                #[trigger] Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k) as u32)
+            Self::of(data).args.len() == Event::ARG_COUNT_MAX,
+            Builder::word(data, Event::OFFSET_NR) == Self::of(data).nr as u32,
+            Builder::word(data, Event::OFFSET_ARCH) == Self::of(data).arch,
+            forall |k: u32| k < Event::ARG_COUNT_MAX ==>
+                #[trigger] Builder::word(data, (Event::OFFSET_ARGS + 8 * k) as u32)
                     == (Self::of(data).args[k as int] & 0xFFFF_FFFF) as u32,
-            forall |k: u32| k < Rule::ARG_COUNT_MAX ==>
-                #[trigger] Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k + 4) as u32)
+            forall |k: u32| k < Event::ARG_COUNT_MAX ==>
+                #[trigger] Builder::word(data, (Event::OFFSET_ARGS + 8 * k + 4) as u32)
                     == (Self::of(data).args[k as int] >> 32) as u32,
     {
         let ev = Self::of(data);
         // `nr` is the word at offset 0, put through the `i32` round trip `parse` writes.
-        let w = Builder::word(data, Policy::OFFSET_EVENT_NR);
+        let w = Builder::word(data, Event::OFFSET_NR);
         assert((w as i32) as u32 == w) by (bit_vector);
         // Each argument spans two words: the low one at `16 + 8 * k`, the high one four on.
         assert forall |k: u32|
-            #![trigger Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k) as u32)]
-            #![trigger Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k + 4) as u32)]
-            k < Rule::ARG_COUNT_MAX implies
-            Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k) as u32)
+            #![trigger Builder::word(data, (Event::OFFSET_ARGS + 8 * k) as u32)]
+            #![trigger Builder::word(data, (Event::OFFSET_ARGS + 8 * k + 4) as u32)]
+            k < Event::ARG_COUNT_MAX implies
+            Builder::word(data, (Event::OFFSET_ARGS + 8 * k) as u32)
                 == (ev.args[k as int] & 0xFFFF_FFFF) as u32
-            && Builder::word(data, (Policy::OFFSET_EVENT_ARGS + 8 * k + 4) as u32)
+            && Builder::word(data, (Event::OFFSET_ARGS + 8 * k + 4) as u32)
                 == (ev.args[k as int] >> 32) as u32
         by {
-            let i = Policy::OFFSET_EVENT_ARGS + 8 * (k as int);
+            let i = Event::OFFSET_ARGS + 8 * (k as int);
             let c0 = data@[i];
             let c1 = data@[i + 1];
             let c2 = data@[i + 2];
