@@ -748,7 +748,6 @@ mod tests {
     fn policy_errors() {
         assert!(matches!(policy!(default errno(4096) on x86), Err(Error::Check(CheckError::InvalidErrno(_)))));
         assert!(matches!(policy!(default allow on x86 else errno(4096)), Err(Error::Check(CheckError::InvalidErrno(_)))));
-        assert!(matches!(policy!(default allow on x86; [arm] allow getpid()), Err(Error::Check(CheckError::RuleArchNotEnabled))));
         assert!(matches!(
             policy!(default allow on x86; allow getpid(); errno(4096) getppid()),
             Err(Error::Check(CheckError::InvalidErrno(_))),

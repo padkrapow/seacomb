@@ -27,7 +27,7 @@ pub enum CheckError {
     #[error("{op} cannot be applied to {lhs} and {rhs}")]
     BinOpTypes { op: BinOp, lhs: PrimType, rhs: PrimType },
     /// A rule has conditions on a syscall whose signatures differ across architectures.
-    #[error("syscall signatures differ across enabled architectures")]
+    #[error("syscall signatures differ across the rule's architectures")]
     IncompatSigs,
     /// A multiplexed syscall rule cannot have argument conditions.
     #[error("multiplexed syscall rule cannot have argument conditions")]
@@ -35,9 +35,6 @@ pub enum CheckError {
     /// The filter already includes this architecture.
     #[error("filter already includes this architecture")]
     DuplicateArch,
-    /// A rule uses an architecture not added to the filter.
-    #[error("rule uses an architecture not added to the filter")]
-    RuleArchNotEnabled,
 }
 
 impl Action {
@@ -231,37 +228,12 @@ impl Arch {
 }
 
 impl Rule {
-    /// Checks the rule against every enabled architecture.
+    /// Checks the rule against each architecture it lists, or every enabled one if it lists none.
     pub(crate) fn check(&self, archs: &[Arch]) -> (res: Result<(), CheckError>)
         ensures res is Ok ==> self.wf(archs@)
     {
         self.action.check()?;
         Arch::check_distinct(self.archs.as_slice())?;
-        let mut i: usize = 0;
-        while i < self.archs.len()
-            invariant
-                i <= self.archs@.len(),
-                forall |k: int| 0 <= k < i ==> archs@.contains(#[trigger] self.archs@[k]),
-            decreases self.archs@.len() - i
-        {
-            let arch = self.archs[i];
-            let mut j: usize = 0;
-            while j < archs.len() && archs[j] != arch
-                invariant
-                    j <= archs@.len(),
-                    forall |k: int| 0 <= k < j ==> #[trigger] archs@[k] != arch,
-                decreases archs@.len() - j
-            {
-                j += 1;
-            }
-            if j == archs.len() {
-                return Err(CheckError::RuleArchNotEnabled);
-            }
-            proof {
-                assert(archs@[j as int] == arch);
-            }
-            i += 1;
-        }
         let active = if self.archs.is_empty() { archs } else { self.archs.as_slice() };
         self.check_on(active)
     }

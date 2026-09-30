@@ -9,6 +9,15 @@ All notable changes to this crate are documented here. The format follows
 
 - `Display` impls for various types in the policy AST.
 
+### Changed
+
+- A rule may now list architectures its policy does not enable, in which case
+  it's not compiled for that architecture but still type-checked.
+
+### Removed
+
+- `CheckError::RuleArchNotEnabled`.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added

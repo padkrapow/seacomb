@@ -463,26 +463,21 @@ fn rule_on_archs() {
     }
 }
 
-/// A rule's architectures must be distinct and already added to the policy.
+/// A rule's architectures must be distinct, and the ones the policy lacks are ignored.
 #[test]
 fn rule_on_archs_checks() {
     let native = Arch::native().unwrap();
     let other = if native == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
     let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
-    assert!(matches!(
-        policy.add(rule!([{other}] {Expect::DENY} getppid())),
-        Err(Error::Check(CheckError::RuleArchNotEnabled)),
-    ));
-    assert!(matches!(
-        policy.add(rule!([{native}, {other}] {Expect::DENY} exact getppid())),
-        Err(Error::Check(CheckError::RuleArchNotEnabled)),
-    ));
+    policy.add(rule!([{other}] {Expect::DENY} getppid())).unwrap();
+    policy.add(rule!([{native}, {other}] {Expect::DENY} exact getuid())).unwrap();
     let mut twice = rule!([{native}] {Expect::DENY} getppid());
     twice.archs.push(native);
     assert!(matches!(policy.add(twice), Err(Error::Check(CheckError::DuplicateArch))));
     unsafe {
         policy.install_and_check(libc::SYS_getpid, [0; 6], Expect::Denied);
         policy.install_and_check(libc::SYS_getppid, [0; 6], Expect::Ok);
+        policy.install_and_check(libc::SYS_getuid, [0; 6], Expect::Denied);
     }
 }
 

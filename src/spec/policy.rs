@@ -96,6 +96,10 @@ impl Action {
 
 impl Rule {
     /// Active architectures, given the global default architectures.
+    ///
+    /// NOTE: Even under the `wf()` condition, a rule may still contain
+    /// architectures that are not in `default_archs`, which is an intentional
+    /// choice to allow more flexibility at the API level.
     pub open spec fn active_archs(self, default_archs: Seq<Arch>) -> Seq<Arch> {
         if self.archs@.len() == 0 {
             default_archs
@@ -109,9 +113,9 @@ impl Rule {
         let active_archs = self.active_archs(default_archs);
         &&& self.action.wf()
         // Local active arch list is well-formed
+        // NOTE: we don't require them to be a subset of `default_archs`
         &&& forall |i: int, j: int| #![trigger self.archs@[i], self.archs@[j]]
                 0 <= i < j < self.archs@.len() ==> self.archs@[i] != self.archs@[j]
-        &&& forall |i: int| 0 <= i < self.archs.len() ==> default_archs.contains(#[trigger] self.archs[i])
         // The condition is well-formed under every active arch
         &&& forall |i: int| 0 <= i < active_archs.len() ==>
                 self.cond.wf(#[trigger] active_archs[i], self.syscall.spec_signature(active_archs[i]))
