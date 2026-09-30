@@ -41,10 +41,12 @@ let policy = policy! {
 }
 ```
 
-For larger examples, see how
-[Docker's default profile](https://github.com/thai-terrace/seacomb/blob/main/examples/docker.rs)
-and [Flatpak's filter](https://github.com/thai-terrace/seacomb/blob/main/examples/flatpak.rs) can be written in `seacomb`.
-On Linux, `cargo run --example docker -- COMMAND [ARGS..]` runs a command under Docker's profile.
+See also how seccomp policies in the the following projects can be written in `seacomb`:
+- [Docker](https://github.com/thai-terrace/seacomb/blob/main/examples/docker.rs)
+- [Flatpak](https://github.com/thai-terrace/seacomb/blob/main/examples/flatpak.rs)
+- [snapd](https://github.com/thai-terrace/seacomb/blob/main/examples/snapd.rs)
+- [Chromium](https://github.com/thai-terrace/seacomb/blob/main/examples/chrome.rs) (with some gaps)
+- [Firefox](https://github.com/thai-terrace/seacomb/blob/main/examples/firefox.rs) (with some gaps)
 
 Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-endian), and AArch64.
 
@@ -124,5 +126,4 @@ is also not verified and marked `unsafe` since it requires low-level syscalls.
 
 - [Jitk: A Trustworthy In-Kernel Interpreter Infrastructure](https://dl.acm.org/doi/10.5555/2685048.2685052)
 - [libseccomp](https://github.com/seccomp/libseccomp)
-  (Rust binding: [libseccomp-rs](https://github.com/libseccomp-rs/libseccomp-rs))
 - [seccompiler](https://github.com/rust-vmm/seccompiler)
