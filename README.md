@@ -41,6 +41,11 @@ let policy = policy! {
 }
 ```
 
+For larger examples, see how
+[Docker's default profile](https://github.com/thai-terrace/seacomb/blob/main/examples/docker.rs)
+and [Flatpak's filter](https://github.com/thai-terrace/seacomb/blob/main/examples/flatpak.rs) can be written in `seacomb`.
+On Linux, `cargo run --example docker -- COMMAND [ARGS..]` runs a command under Docker's profile.
+
 Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-endian), and AArch64.
 
 ## What has been formally verified
