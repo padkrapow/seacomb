@@ -108,7 +108,7 @@ impl Policy {
         Ok(policy)
     }
 
-    /// Adds `arch` to the architectures covered by this policy's rules.
+    /// Adds `arch` to the architectures covered by this policy's rules, unless it already exists.
     pub fn add_arch(&mut self, arch: Arch) -> (res: Result<(), Error>)
         requires old(self).wf()
         ensures
@@ -116,8 +116,9 @@ impl Policy {
             final(self).act_no_match == old(self).act_no_match,
             final(self).act_bad_arch == old(self).act_bad_arch,
             final(self).rules == old(self).rules,
-            res is Ok ==> final(self).archs@ == old(self).archs@.push(arch),
-            res is Err ==> *final(self) == *old(self),
+            old(self).archs@.contains(arch) ==> res is Ok && final(self).archs@ == old(self).archs@,
+            res is Ok && !old(self).archs@.contains(arch) ==> final(self).archs@ == old(self).archs@.push(arch),
+            res is Err ==> final(self).archs@ == old(self).archs@,
     {
         let mut i: usize = 0;
         while i < self.archs.len()
@@ -129,31 +130,38 @@ impl Policy {
             decreases self.archs@.len() - i
         {
             if self.archs[i] == arch {
-                return Err(Error::Check(CheckError::DuplicateArch));
+                proof { assert(self.archs@[i as int] == arch); }
+                return Ok(());
             }
             i += 1;
         }
+        proof { assert(!self.archs@.contains(arch)); }
 
-        let mut prospective = self.archs.clone();
-        prospective.push(arch);
+        let ghost prev = self.archs@;
+        self.archs.push(arch);
         let mut r: usize = 0;
         while r < self.rules.len()
             invariant
-                self.wf(),
-                prospective@ == self.archs@.push(arch),
+                old(self).wf(),
+                !prev.contains(arch),
+                prev == old(self).archs@,
+                self.archs@ == prev.push(arch),
+                self.rules == old(self).rules,
+                self.act_no_match == old(self).act_no_match,
+                self.act_bad_arch == old(self).act_bad_arch,
                 r <= self.rules@.len(),
                 forall |k: int| 0 <= k < r ==>
-                    #[trigger] self.rules@[k].wf(prospective@),
+                    #[trigger] self.rules@[k].wf(self.archs@),
             decreases self.rules@.len() - r
         {
-            if let Err(err) = self.rules[r].check(prospective.as_slice()) {
+            if let Err(err) = self.rules[r].check(self.archs.as_slice()) {
+                self.archs.pop();
+                proof { assert(self.archs@ =~= prev); }
                 return Err(Error::Check(err));
             }
             r += 1;
         }
 
-        let ghost prev = self.archs@;
-        self.archs.push(arch);
         proof {
             assert forall |k: int, l: int| 0 <= k < l < self.archs@.len()
                 implies #[trigger] self.archs@[k] != #[trigger] self.archs@[l] by {
@@ -162,10 +170,6 @@ impl Policy {
                 } else {
                     assert(prev[k] != arch);
                 }
-            }
-            assert forall |k: int| 0 <= k < self.rules@.len()
-                implies #[trigger] self.rules@[k].wf(self.archs@) by {
-                assert(self.rules@[k].wf(prospective@));
             }
         }
         Ok(())

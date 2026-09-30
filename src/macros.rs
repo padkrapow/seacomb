@@ -271,7 +271,18 @@ macro_rules! rule {
             action: $crate::rule!(@action $($act)*),
             syscall: $($sys)*,
             cond: $crate::rule!(@cond $($($c)+)?),
-            archs: ::std::vec![$( $crate::rule!(@arch $arch) ),*],
+            archs: {
+                // Keeps the first of each arch, since `[native, x86]` repeats one on an x86 host.
+                #[allow(unused_mut)]
+                let mut archs = ::std::vec::Vec::new();
+                $(
+                    let arch = $crate::rule!(@arch $arch);
+                    if !archs.contains(&arch) {
+                        archs.push(arch);
+                    }
+                )*
+                archs
+            },
             no_mux: $exact,
         }
     }};
@@ -300,11 +311,12 @@ macro_rules! rule {
     (@action { $a:expr }) => { $a };
     (@action $($t:tt)*) => { compile_error!(concat!("expected an action, found `", stringify!($($t)*), "`")) };
 
-    // arch := x86 | x86_64 | arm | aarch64 | '{' rust-expr '}'
+    // arch := x86 | x86_64 | arm | aarch64 | native | '{' rust-expr '}'
     (@arch x86) => { $crate::Arch::X86 };
     (@arch x86_64) => { $crate::Arch::X86_64 };
     (@arch arm) => { $crate::Arch::Arm };
     (@arch aarch64) => { $crate::Arch::Aarch64 };
+    (@arch native) => { $crate::Arch::native()? };
     (@arch { $a:expr }) => { $a };
     (@arch $a:tt) => { compile_error!(concat!("unknown arch `", stringify!($a), "`")) };
 
@@ -336,8 +348,8 @@ macro_rules! rule {
 #[macro_export]
 macro_rules! policy {
     // policy := header ';' (rule ';')*, where the last ';' may be left off
-    // header := 'default' action 'on' arch (',' arch)* ['else' action]
-    // arch   := native | rule's arch
+    // header := 'default' action 'on' arch (',' arch)* ['else' action], where a repeated arch counts once
+    // arch   := rule's arch
     // rule   := rule's rule | '{' rust-expr '}'
 
     // Takes up to four tokens a step to find each `;`, which keeps long policies under the default `recursion_limit`.
@@ -375,13 +387,10 @@ macro_rules! policy {
     // Without `else`, the bad-arch action stays the one `Policy::new` picks.
     (@new [$($act:tt)+] [$($arch:tt),+] $([$($bad:tt)+])?) => {{
         let mut policy = $crate::Policy::new($crate::rule!(@action $($act)+))?;
-        $( policy.add_arch($crate::policy!(@arch $arch))?; )+
+        $( policy.add_arch($crate::rule!(@arch $arch))?; )+
         $( policy.on_bad_arch($crate::rule!(@action $($bad)+))?; )?
         policy
     }};
-
-    (@arch native) => { $crate::Arch::native()? };
-    (@arch $a:tt) => { $crate::rule!(@arch $a) };
 
     (@rule { $r:expr }) => { $r };
     (@rule $($t:tt)*) => { $crate::rule!($($t)*) };
@@ -488,9 +497,6 @@ struct RuleMacroTests;
 /// ```
 /// ```compile_fail
 /// seacomb::policy!(default allow on x86;; allow read(fd));
-/// ```
-/// ```compile_fail
-/// seacomb::policy!(default allow on x86; [native] allow read(fd));
 /// ```
 #[cfg(doctest)]
 struct PolicyMacroTests;
@@ -668,7 +674,7 @@ mod tests {
         assert_eq!(format!("{:?}", rule!([x86, x86_64, arm, aarch64] allow getpid()).archs), "[X86, X86_64, Arm, Aarch64]");
         assert_eq!(format!("{:?}", rule!([{native}] allow getpid()).archs), "[Arm]");
         assert_eq!(format!("{:?}", rule!([x86_64, {archs[1]}] allow getpid()).archs), "[X86_64, Aarch64]");
-        assert_eq!(format!("{:?}", rule!([x86, x86] allow getpid()).archs), "[X86, X86]");
+        assert_eq!(format!("{:?}", rule!([x86, x86] allow getpid()).archs), "[X86]");
         assert_eq!(format!("{:?}", rule!([x86, arm,] allow getpid()).archs), "[X86, Arm]");
     }
 
@@ -721,6 +727,7 @@ mod tests {
         assert_eq!(format!("{:?}", policy!(default {Action::Log} on {other} else trap(1 + 1)).unwrap()),
             "Policy { archs: [Arm], rules: [], act_no_match: Log, act_bad_arch: Trap(2) }");
         assert_eq!(policy!(default kill_thread on native).unwrap().archs, [Arch::native().unwrap()]);
+        assert_eq!(policy!(default allow on x86, x86).unwrap().archs, [Arch::X86]);
     }
 
     #[test]
@@ -741,7 +748,6 @@ mod tests {
     fn policy_errors() {
         assert!(matches!(policy!(default errno(4096) on x86), Err(Error::Check(CheckError::InvalidErrno(_)))));
         assert!(matches!(policy!(default allow on x86 else errno(4096)), Err(Error::Check(CheckError::InvalidErrno(_)))));
-        assert!(matches!(policy!(default allow on x86, x86), Err(Error::Check(CheckError::DuplicateArch))));
         assert!(matches!(policy!(default allow on x86; [arm] allow getpid()), Err(Error::Check(CheckError::RuleArchNotEnabled))));
         assert!(matches!(
             policy!(default allow on x86; allow getpid(); errno(4096) getppid()),

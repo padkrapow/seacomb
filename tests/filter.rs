@@ -38,10 +38,6 @@ fn default_action() {
 #[test]
 fn failed_add_keeps_rules() {
     let mut policy = policy!(default allow on native; {Expect::DENY} getpid()).unwrap();
-    assert!(matches!(
-        policy.add_arch(Arch::native().unwrap()),
-        Err(Error::Check(CheckError::DuplicateArch))
-    ));
     for rule in [
         rule!(errno(4096) getppid()),
         rule!(errno(8) getppid() if {Expr::Var(u32::MAX)} == {Expr::Var(u32::MAX)}),
@@ -481,22 +477,22 @@ fn rule_on_archs_checks() {
         policy.add(rule!([{native}, {other}] {Expect::DENY} exact getppid())),
         Err(Error::Check(CheckError::RuleArchNotEnabled)),
     ));
-    assert!(matches!(
-        policy.add(rule!([{native}, {native}] {Expect::DENY} getppid())),
-        Err(Error::Check(CheckError::DuplicateArch)),
-    ));
+    let mut twice = rule!([{native}] {Expect::DENY} getppid());
+    twice.archs.push(native);
+    assert!(matches!(policy.add(twice), Err(Error::Check(CheckError::DuplicateArch))));
     unsafe {
         policy.install_and_check(libc::SYS_getpid, [0; 6], Expect::Denied);
         policy.install_and_check(libc::SYS_getppid, [0; 6], Expect::Ok);
     }
 }
 
-/// A native policy already has the native architecture and takes every other one.
+/// A native policy already has the native architecture, keeps it once, and takes every other one.
 #[test]
 fn new_native() {
     let mut policy = Policy::new_native(Action::Errno(7)).unwrap();
     let native = Arch::native().unwrap();
-    assert!(matches!(policy.add_arch(native), Err(Error::Check(CheckError::DuplicateArch))));
+    policy.add_arch(native).unwrap();
+    assert_eq!(policy.archs, [native]);
     for arch in [Arch::X86, Arch::X86_64, Arch::Arm, Arch::Aarch64] {
         if arch != native {
             policy.add_arch(arch).unwrap();
@@ -547,10 +543,10 @@ fn errno_limit() {
     assert!(policy!(default errno(Action::MAX_ERRNO as u16) on native).is_ok());
 }
 
-/// The same architecture twice is turned down.
+/// The same architecture twice counts once.
 #[test]
 fn duplicate_arch() {
-    assert!(policy!(default allow on native, native).is_err());
+    assert_eq!(policy!(default allow on native, native).unwrap().archs, [Arch::native().unwrap()]);
 }
 
 /// A rule that repeats the default action is allowed.
