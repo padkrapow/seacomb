@@ -243,8 +243,9 @@ impl<S: Syscall> Rule<S> {
         ensures res is Ok ==> {
             &&& forall |k: int| 0 <= k < archs@.len() ==>
                     self.cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k]))
-            &&& forall |k: int| 0 <= k < archs@.len() ==>
-                    !self.no_mux && self.syscall.spec_mux(#[trigger] archs@[k]) is Some ==> *self.cond == Cond::True
+            &&& forall |k: int| 0 <= k < archs@.len() ==> !self.no_mux ==>
+                    (self.syscall.spec_mux(#[trigger] archs@[k]) matches Some((mux, cond)) ==>
+                    *self.cond == Cond::True && cond.wf(archs@[k], mux.spec_signature(archs@[k])))
             &&& forall |k: int, l: int| #![trigger archs@[k], archs@[l]]
                     0 <= k < l < archs@.len() &&
                     self.syscall.spec_signature(archs@[k]) != self.syscall.spec_signature(archs@[l])
@@ -269,13 +270,19 @@ impl<S: Syscall> Rule<S> {
                     self.syscall.spec_signature(#[trigger] archs@[k]) =~= first@,
                 forall |k: int| 0 <= k < i ==>
                     cond.wf(#[trigger] archs@[k], self.syscall.spec_signature(archs@[k])),
-                forall |k: int| 0 <= k < i ==>
-                    !self.no_mux && self.syscall.spec_mux(#[trigger] archs@[k]) is Some ==> *self.cond == Cond::True,
+                forall |k: int| 0 <= k < i ==> !self.no_mux ==>
+                    (self.syscall.spec_mux(#[trigger] archs@[k]) matches Some((mux, cond)) ==>
+                    *self.cond == Cond::True && cond.wf(archs@[k], mux.spec_signature(archs@[k]))),
             decreases archs@.len() - i
         {
             let arch = archs[i];
-            if constrained && !self.no_mux && self.syscall.mux(arch).is_some() {
-                return Err(CheckError::InvalidMuxConditions);
+            if !self.no_mux {
+                if let Some((mux, mux_cond)) = self.syscall.mux(arch) {
+                    if constrained {
+                        return Err(CheckError::InvalidMuxConditions);
+                    }
+                    mux_cond.check(arch, mux.signature(arch))?;
+                }
             }
             let sig = self.syscall.signature(arch);
             if constrained {

@@ -377,6 +377,8 @@ impl<S: Syscall> Rule<S> {
         requires
             self.active_on(arch),
             self.cond.wf(arch, self.syscall.spec_signature(arch)),
+            !self.no_mux ==> (self.syscall.spec_mux(arch) matches Some((mux, cond)) ==>
+                cond.wf(arch, mux.spec_signature(arch))),
             0 < b.rev@.len(), b.wf(),
         ensures
             Builder::extends(old(b).rev@, final(b).rev@),
@@ -393,7 +395,6 @@ impl<S: Syscall> Rule<S> {
         if !self.no_mux {
             if let Some((mux, cond)) = self.syscall.mux(arch) {
                 if let Some(nr) = mux.nr(arch) {
-                    proof { self.syscall.prop_mux_wf(arch); }
                     self.emit(b, arch, nr as u32, &cond, mux.signature(arch))?;
                 }
             }

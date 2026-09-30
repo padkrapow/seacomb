@@ -1,44 +1,5 @@
-use vstd::prelude::*;
-use std::sync::Arc;
-use crate::spec::expr::{BinOp, CmpOp, Cond, Expr, PrimType};
 #[allow(unused_imports)]
-use crate::spec::policy::Arch;
-
-verus! {
-
-impl Cond {
-    /// Generates a condition of the form `@n & mask == val`, with both literals of type `ty`.
-    pub open spec fn spec_masked_eq(n: u32, mask: i64, val: i64, ty: PrimType) -> Cond {
-        Cond::Cmp(CmpOp::Eq,
-            Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
-            Arc::new(Expr::Lit(val, ty)))
-    }
-
-    /// Executable version of `Cond::spec_masked_eq`.
-    pub fn masked_eq(n: u32, mask: i64, val: i64, ty: PrimType) -> (res: Cond)
-        ensures res == Cond::spec_masked_eq(n, mask, val, ty)
-    {
-        Cond::Cmp(CmpOp::Eq,
-            Arc::new(Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)))),
-            Arc::new(Expr::Lit(val, ty)))
-    }
-
-    /// A masked equality is well-formed when argument `n` has a non-pointer type.
-    pub proof fn lemma_masked_eq_wf(arch: Arch, sig: Seq<PrimType>, n: u32, mask: i64, val: i64)
-        requires n < sig.len(), sig[n as int].wf(), sig[n as int] != PrimType::Ptr
-        ensures Cond::spec_masked_eq(n, mask, val, sig[n as int]).wf(arch, sig)
-    {
-        let ty = sig[n as int];
-        let e = Expr::BinOp(BinOp::And, Arc::new(Expr::Var(n)), Arc::new(Expr::Lit(mask, ty)));
-        assert(Expr::Var(n).of_type(arch, sig, ty));
-        assert(Expr::Lit(mask, ty).of_type(arch, sig, ty));
-        assert(ty.subtype_of(arch, ty));
-        assert(e.of_type(arch, sig, ty));
-        assert(Expr::Lit(val, ty).of_type(arch, sig, ty));
-    }
-}
-
-} // verus!
+use vstd::prelude::*;
 
 /// Defines a syscall enum and its `Syscall` impl from `#[name]`, `#[on]`, and `#[mux]` annotations.
 ///
@@ -94,14 +55,26 @@ macro_rules! impl_syscall {
                 #[allow(unreachable_patterns)]
                 #[verifier::opaque]
                 open spec fn spec_mux(self, arch: $crate::Arch) -> Option<(Self, $crate::Cond)> {
-                    match self {
+                    let entry: Option<(Self, u32, i64, i64)> = match self {
                         $(
                             $name::$variant => match arch {
-                                $( $crate::Arch::$march => Some(($name::$mux, $crate::Cond::spec_masked_eq($n, $mask, $val,
-                                    $crate::Syscall::spec_signature($name::$mux, arch)[$n]))), )*
+                                $( $crate::Arch::$march => Some(($name::$mux, $n, $mask, $val)), )*
                                 _ => None,
                             },
                         )*
+                    };
+                    match entry {
+                        Some((mux, n, mask, val)) => {
+                            let sig = $crate::Syscall::spec_signature(mux, arch);
+                            // An out-of-range argument fails `Cond::wf` whatever its type, so any type fills in.
+                            let ty = if n < sig.len() { sig[n as int] } else { $crate::PrimType::Ptr };
+                            Some((mux, $crate::Cond::Cmp($crate::CmpOp::Eq,
+                                ::std::sync::Arc::new($crate::Expr::BinOp($crate::BinOp::And,
+                                    ::std::sync::Arc::new($crate::Expr::Var(n)),
+                                    ::std::sync::Arc::new($crate::Expr::Lit(mask, ty)))),
+                                ::std::sync::Arc::new($crate::Expr::Lit(val, ty)))))
+                        }
+                        None => None,
                     }
                 }
 
@@ -153,32 +126,25 @@ macro_rules! impl_syscall {
                 #[allow(unreachable_patterns)]
                 fn mux(self, arch: $crate::Arch) -> (res: Option<(Self, $crate::Cond)>) {
                     reveal(<$name as $crate::Syscall>::spec_mux);
-                    reveal(<$name as $crate::Syscall>::spec_signature);
-                    match self {
+                    let entry: Option<(Self, u32, i64, i64)> = match self {
                         $(
                             $name::$variant => match arch {
-                                $( $crate::Arch::$march => {
-                                    let sig = $crate::Syscall::signature($name::$mux, arch);
-                                    Some(($name::$mux, $crate::Cond::masked_eq($n, $mask, $val, sig[$n])))
-                                }, )*
+                                $( $crate::Arch::$march => Some(($name::$mux, $n, $mask, $val)), )*
                                 _ => None,
                             },
                         )*
-                    }
-                }
-
-                #[allow(unreachable_patterns)]
-                proof fn prop_mux_wf(self, arch: $crate::Arch) {
-                    reveal(<$name as $crate::Syscall>::spec_mux);
-                    reveal(<$name as $crate::Syscall>::spec_signature);
-                    match self {
-                        $(
-                            $name::$variant => match arch {
-                                $( $crate::Arch::$march => $crate::Cond::lemma_masked_eq_wf(arch,
-                                    $crate::Syscall::spec_signature($name::$mux, arch), $n, $mask, $val), )*
-                                _ => {},
-                            },
-                        )*
+                    };
+                    match entry {
+                        Some((mux, n, mask, val)) => {
+                            let sig = $crate::Syscall::signature(mux, arch);
+                            let ty = if (n as usize) < sig.len() { sig[n as usize] } else { $crate::PrimType::Ptr };
+                            Some((mux, $crate::Cond::Cmp($crate::CmpOp::Eq,
+                                ::std::sync::Arc::new($crate::Expr::BinOp($crate::BinOp::And,
+                                    ::std::sync::Arc::new($crate::Expr::Var(n)),
+                                    ::std::sync::Arc::new($crate::Expr::Lit(mask, ty)))),
+                                ::std::sync::Arc::new($crate::Expr::Lit(val, ty)))))
+                        }
+                        None => None,
                     }
                 }
             }

@@ -53,11 +53,6 @@ pub trait Syscall: Copy {
     /// (e.g., `socket(..)` is multiplexed with `socketcall(1, ..)`)
     fn mux(self, arch: Arch) -> (res: Option<(Self, Cond)>)
         ensures res == self.spec_mux(arch);
-
-    /// Conditions returned by the multiplexed call must be well-formed.
-    proof fn prop_mux_wf(self, arch: Arch)
-        ensures self.spec_mux(arch) matches Some((mux, cond))
-            ==> cond.wf(arch, mux.spec_signature(arch));
 }
 
 /// A policy rule, which applies an action to a syscall event if
@@ -148,9 +143,9 @@ impl<S: Syscall> Rule<S> {
                 self.cond.wf(#[trigger] active_archs[i], self.syscall.spec_signature(active_archs[i]))
         // When allowing mux, the rule should not have any conditions
         // since the multiplexed call may have different argument positions.
-        // TODO: Ideally, we should only check this if x86 is enabled
-        &&& forall |i: int| 0 <= i < active_archs.len() ==>
-                !self.no_mux && self.syscall.spec_mux(#[trigger] active_archs[i]) is Some ==> *self.cond == Cond::True
+        &&& !self.no_mux ==> forall |i: int| 0 <= i < active_archs.len() ==>
+                (self.syscall.spec_mux(#[trigger] active_archs[i]) matches Some((mux, cond)) ==>
+                *self.cond == Cond::True && cond.wf(active_archs[i], mux.spec_signature(active_archs[i])))
         // If a rule's syscall differ in signature on two different supported architectures,
         // it must not impose a condition on the argument.
         &&& forall |i: int, j: int| #![trigger active_archs[i], active_archs[j]]
