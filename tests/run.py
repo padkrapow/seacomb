@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
-"""Build seacomb's tests for each supported Linux target and run them under QEMU.
+"""Runs seacomb's tests for each supported Linux target under QEMU.
 
 Usage: python3 tests/run.py [all|x86_64|i686|aarch64|armv7l]
-
-The doctests run the same way: cargo hands each one to this script as its target runner,
-through `--boot`, which boots the binary and exits with its status.
-
-The test binaries are static musl executables, so a guest needs nothing but a kernel.
-Each binary is packed into an initramfs as /init and booted with a pinned Alpine kernel,
-downloaded once into target/test-kernels. The serial console carries the test output,
-and the panic the kernel raises when /init exits carries the exit status.
 """
+
 import argparse
 import hashlib
 import json
@@ -20,7 +13,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -44,7 +36,7 @@ MACHINES = {
     "x86_64": Machine(
         kernel="x86_64/netboot-3.24.2/vmlinuz-virt",
         sha256="40f620bc8c93d952e57dd8dfc0f94fca1759d192a4fc4a260705d50ca378559c",
-        qemu=["qemu-system-x86_64", "-M", "q35", "-cpu", "max"],
+        qemu=["qemu-system-x86_64", "-cpu", "max"],
         console="ttyS0",
     ),
     "aarch64": Machine(
@@ -74,39 +66,20 @@ TARGETS = {
 INIT_EXIT = re.compile(r"Attempted to kill init! exitcode=0x([0-9a-f]+)")
 
 
-def run(*args, capture=False):
-    """Runs a command from the repository root and returns its output if captured."""
-    return subprocess.run(args, text=True, cwd=ROOT, check=True,
-                          stdout=subprocess.PIPE if capture else None).stdout
+def run(*args):
+    """Runs a command from the repository root."""
+    subprocess.run(args, cwd=ROOT, check=True)
 
 
-def build(targets):
-    """Builds the test binaries for all `targets` in one cargo run and returns their paths per target."""
+def test(targets):
+    """Runs every test for each of `targets` in one cargo run, which boots each binary through `--boot`."""
     flags = []
-    for target in targets:
-        flags += ["--target", target, "--config", f'target.{target}.linker="rust-lld"']
-    output = run("cargo", "test", "--no-run", "--locked", *flags,
-                 "--target-dir", str(BUILD_DIR),
-                 "--message-format=json-render-diagnostics", capture=True)
-    artifacts = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
-    binaries = {target: [] for target in targets}
-    for a in artifacts:
-        if a.get("reason") == "compiler-artifact" and a["profile"]["test"] and a.get("executable"):
-            # Each target builds under its own `<target-dir>/<target>/`.
-            binaries[Path(a["executable"]).relative_to(BUILD_DIR).parts[0]].append(a["executable"])
-    for target, paths in binaries.items():
-        if not paths:
-            sys.exit(f"No test executables built for {target}.")
-    return binaries
-
-
-def test_doc(target, machine_arch):
-    """Builds the doctests for `target` and has cargo boot each one through `--boot`."""
-    runner = json.dumps([sys.executable, str(Path(__file__).resolve()), "--boot", machine_arch])
-    run("cargo", "test", "--doc", "--locked", "--target", target,
-        "--config", f'target.{target}.linker="rust-lld"',
-        "--config", f"target.{target}.runner={runner}",
-        "--target-dir", str(BUILD_DIR))
+    for target, machine_arch in targets:
+        runner = json.dumps([sys.executable, str(Path(__file__).resolve()), "--boot", machine_arch])
+        flags += ["--target", target,
+                  "--config", f'target.{target}.linker="rust-lld"',
+                  "--config", f"target.{target}.runner={runner}"]
+    run("cargo", "test", "--locked", *flags, "--target-dir", str(BUILD_DIR))
 
 
 def fetch_kernel(machine):
@@ -143,7 +116,7 @@ def write_initramfs(binary, path):
 
 def accelerator(arch):
     """Returns QEMU's -accel flag, using the host hypervisor when `arch` is native and it has one."""
-    host = {"arm64": "aarch64", "AMD64": "x86_64"}.get(platform.machine(), platform.machine())
+    host = {"arm64": "aarch64"}.get(platform.machine(), platform.machine())
     if arch == host and platform.system() == "Darwin":
         # QEMU aborts rather than trying the next -accel when HVF is missing, as on GitHub's
         # macOS runners, where this sysctl is 0 or absent.
@@ -161,7 +134,7 @@ def boot(arch, binary, scratch):
     initrd = scratch / f"{Path(binary).name}.cpio"
     write_initramfs(binary, initrd)
     command = [
-        *machine.qemu, *accelerator(arch), "-m", "512M", "-smp", "2",
+        *machine.qemu, *accelerator(arch), "-smp", "1",
         "-nodefaults", "-display", "none", "-serial", "stdio",
         "-kernel", str(fetch_kernel(machine)), "-initrd", str(initrd),
         # Log only emergencies, and reboot at once on a panic, which
@@ -204,19 +177,7 @@ def main():
         with tempfile.TemporaryDirectory() as scratch:
             sys.exit(exit_code(machine_arch, binary, Path(scratch)))
 
-    started = time.monotonic()
-    arches = list(TARGETS) if args.arch == "all" else [args.arch]
-    binaries = build([TARGETS[arch][0] for arch in arches])
-    with tempfile.TemporaryDirectory() as scratch:
-        for arch in arches:
-            target, machine_arch = TARGETS[arch]
-            for binary in sorted(binaries[target]):
-                print(f"==> Testing {arch}: {Path(binary).name}", flush=True)
-                if code := exit_code(machine_arch, binary, Path(scratch)):
-                    sys.exit(code)
-            print(f"==> Testing {arch}: doctests", flush=True)
-            test_doc(target, machine_arch)
-    print(f"All selected tests passed in {time.monotonic() - started:.1f}s.")
+    test([TARGETS[arch] for arch in (TARGETS if args.arch == "all" else [args.arch])])
 
 
 if __name__ == "__main__":
@@ -224,7 +185,3 @@ if __name__ == "__main__":
         main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
-    except OSError as error:
-        sys.exit(str(error))
-    except KeyboardInterrupt:
-        sys.exit(130)
