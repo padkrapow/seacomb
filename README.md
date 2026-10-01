@@ -47,6 +47,8 @@ See also how seccomp policies in the the following projects can be written in `s
 - [snapd](https://github.com/thai-terrace/seacomb/blob/main/examples/snapd.rs)
 - [Chromium](https://github.com/thai-terrace/seacomb/blob/main/examples/chrome.rs) (with some gaps)
 - [Firefox](https://github.com/thai-terrace/seacomb/blob/main/examples/firefox.rs) (with some gaps)
+- [OpenSSH](https://github.com/thai-terrace/seacomb/blob/main/examples/openssh.rs) (with some gaps)
+- [Firecracker](https://github.com/thai-terrace/seacomb/blob/main/examples/firecracker_vmm.rs)
 
 Currently, `seacomb` supports Linux syscalls on x86, x86-64, 32-bit ARM (little-endian), and AArch64.
 
