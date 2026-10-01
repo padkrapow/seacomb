@@ -228,6 +228,17 @@ impl<S: Syscall> Policy<S> {
         self.act_bad_arch = act;
         Ok(())
     }
+
+    /// Compiles this policy into the bytes of the raw cBPF program
+    /// (an array of `struct sock_filter`) in native byte order.
+    pub fn to_raw_cbpf(&self) -> Result<Vec<u8>, Error>
+        requires self.wf()
+    {
+        match self.to_cbpf() {
+            Ok(program) => Ok(program.assemble().to_bytes()),
+            Err(err) => Err(Error::Compile(err)),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

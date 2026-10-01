@@ -96,12 +96,24 @@ impl Instr {
     }
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(unused))]
 pub(crate) struct RawProgram(Vec<SockFilter>);
 
-#[cfg(target_os = "linux")]
 impl RawProgram {
+    /// The bytes of the raw `struct sock_filter` array in native byte order.
+    #[verifier::external_body]
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.0.len() * 8);
+        for f in &self.0 {
+            bytes.extend_from_slice(&f.code.to_ne_bytes());
+            bytes.push(f.jt);
+            bytes.push(f.jf);
+            bytes.extend_from_slice(&f.k.to_ne_bytes());
+        }
+        bytes
+    }
+
     /// Installs this filter with the given flags and returns the raw `seccomp(2)` result.
+    #[cfg(target_os = "linux")]
     #[verifier::external_body]
     pub(crate) fn install_with_flags(&self, flags: u64) -> libc::c_long {
         let fprog = libc::sock_fprog {
@@ -123,7 +135,6 @@ impl RawProgram {
 
 impl Program {
     /// The `struct sock_filter` array this program assembles to.
-    #[cfg_attr(not(target_os = "linux"), allow(unused))]
     pub(crate) fn assemble(&self) -> RawProgram {
         let mut filter = Vec::with_capacity(self.instrs.len());
         let mut i: usize = 0;
