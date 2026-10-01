@@ -910,7 +910,7 @@ impl Expr {
     ///     <word>
     ///     xor #bias               ; bias != 0
     /// ```
-    fn emit_word(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], hi: bool, bias: u32, sp: u32)
+    pub(super) fn emit_word(&self, b: &mut Builder, arch: Arch, sig: &[PrimType], hi: bool, bias: u32, sp: u32)
         -> (res: Result<(), CompileError>)
         requires old(b).wf(), 0 < old(b).rev@.len(), sp <= 16, self.typed(arch, sig@)
         ensures
@@ -1165,6 +1165,47 @@ impl Expr {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A word of a bitwise and is zero exactly when its operands' words share no bit within
+    /// the same word of its type's mask.
+    pub(super) proof fn lemma_and_word(&self, arch: Arch, ctx: Seq<PrimType>, data: &[u8], ty: PrimType, hi: bool)
+        requires
+            self is BinOp, self->BinOp_0 is And,
+            self.typed(arch, ctx), self.shaped(arch, ctx, ty), ty.wf(),
+            hi ==> ty.bits(arch) == 64,
+        ensures ({
+            let mw: u32 = if hi { (ty.mask(arch) >> 32u64) as u32 } else { ty.mask(arch) as u32 };
+            (self.word(arch, ctx, data, hi) == 0) == (self->BinOp_1.word(arch, ctx, data, hi)
+                & (self->BinOp_2.word(arch, ctx, data, hi) & mw) == 0)
+        })
+    {
+        self.lemma_binary_pattern(arch, ctx, data, ty);
+        let pl = self->BinOp_1.pattern(arch, ctx, data);
+        let pr = self->BinOp_2.pattern(arch, ctx, data);
+        let q = pl & pr;
+        let mask = ty.mask(arch);
+        let b = ty.bits(arch);
+        ty.lemma_mask(arch);
+        ty.lemma_norm(arch, q);
+        let p = q & mask;
+        if b == 64 {
+            ty.lemma_norm_64(arch, q);
+            assert((q as u32 == 0) == ((pl as u32) & ((pr as u32) & (mask as u32)) == 0)
+                && (((q >> 32u64) as u32 == 0)
+                    == (((pl >> 32u64) as u32) & (((pr >> 32u64) as u32) & ((mask >> 32u64) as u32)) == 0)))
+                by (bit_vector)
+                requires q == pl & pr, mask == u64::MAX;
+        } else if ty.signed() && p > mask >> 1u64 {
+            // Below 32 bits the copied sign sets bits of the low word; from 32 on, the low word is `p`'s.
+            assert((((p | !mask) as u32) == 0) == ((pl as u32) & ((pr as u32) & (mask as u32)) == 0))
+                by (bit_vector)
+                requires mask == ((1u64 << b) - 1) as u64, 8 <= b < 64, p == (pl & pr) & mask, p > mask >> 1u64;
+        } else {
+            assert(((p as u32) == 0) == ((pl as u32) & ((pr as u32) & (mask as u32)) == 0))
+                by (bit_vector)
+                requires p == (pl & pr) & mask;
         }
     }
 }

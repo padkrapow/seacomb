@@ -343,15 +343,91 @@ impl CmpOp {
         Ok(())
     }
 
+    /// Emits a test of `lhs op rhs` on their low or high words, flipped by `bias`, that goes
+    /// on to `pass` if it holds and to `fail` otherwise.
+    ///
+    /// ```text
+    ///     <x's test against k>        ; masked_eq k, for lhs == x & m
+    ///
+    ///     <operands' words, bias>     ; otherwise
+    ///     j<op> src -> pass/fail
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    fn emit_test(self, b: &mut Builder, arch: Arch, Ghost(ctx): Ghost<Seq<PrimType>>, sig: &[PrimType],
+        lhs: &Expr, rhs: &Expr, hi: bool, bias: u32, pass: Label, fail: Label) -> (res: Result<(), CompileError>)
+        requires
+            lhs.typed(arch, ctx),
+            rhs.typed(arch, ctx),
+            sig@ == ctx,
+            self is Eq ==> bias == 0,
+            0 < pass <= old(b).rev@.len(),
+            0 < fail <= old(b).rev@.len(),
+            pass == old(b).rev@.len() || fail == old(b).rev@.len(),
+            old(b).wf(),
+        ensures
+            Builder::extends(old(b).rev@, final(b).rev@),
+            final(b).wf(),
+            res is Ok ==> forall |data: &[u8], st: Regs| Event::parse(data) is Some && st.wf()
+                && self.holds((lhs.word(arch, ctx, data, hi) ^ bias) as int,
+                    (rhs.word(arch, ctx, data, hi) ^ bias) as int)
+                ==> #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), st, pass as nat),
+            res is Ok ==> forall |data: &[u8], st: Regs| Event::parse(data) is Some && st.wf()
+                && !self.holds((lhs.word(arch, ctx, data, hi) ^ bias) as int,
+                    (rhs.word(arch, ctx, data, hi) ^ bias) as int)
+                ==> #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), st, fail as nat),
+    {
+        let masked = if self == CmpOp::Eq { lhs.masked_eq(rhs, arch, sig, hi) } else { None };
+        if let (Some(k), Expr::BinOp(_, x, _)) = (masked, lhs) {
+            x.emit_jset(b, arch, Ghost(ctx), sig, hi, k, pass, fail)?;
+            proof {
+                assert forall |data: &[u8]| #![trigger lhs.word(arch, ctx, data, hi)]
+                    lhs.word(arch, ctx, data, hi) ^ 0 == lhs.word(arch, ctx, data, hi)
+                    && rhs.word(arch, ctx, data, hi) ^ 0 == rhs.word(arch, ctx, data, hi) by {
+                    let (wl, wr) = (lhs.word(arch, ctx, data, hi), rhs.word(arch, ctx, data, hi));
+                    assert(wl ^ 0u32 == wl && wr ^ 0u32 == wr) by (bit_vector);
+                }
+            }
+            return Ok(());
+        }
+        self.emit_jump(b, rhs.src(arch, hi, bias), pass, fail)?;
+        let ghost r_jmp = b.rev@;
+        lhs.emit_operands(rhs, b, arch, sig, hi, bias, 0)?;
+        proof {
+            assert forall |data: &[u8], st: Regs|
+                #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)]
+                #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)]
+                Event::parse(data) is Some && st.wf() implies {
+                let holds = self.holds((lhs.word(arch, ctx, data, hi) ^ bias) as int,
+                    (rhs.word(arch, ctx, data, hi) ^ bias) as int);
+                &&& holds ==> Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)
+                &&& !holds ==> Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)
+            } by {
+                let src = rhs.src(arch, hi, bias);
+                let wl = lhs.word(arch, ctx, data, hi) ^ bias;
+                let wr = rhs.word(arch, ctx, data, hi) ^ bias;
+                let to = if self.holds(wl as int, wr as int) { pass } else { fail };
+                assert(Builder::loads2(b.rev@, data, b.rev@.len(), st, r_jmp.len(), wl, src, wr, 0));
+                let t = choose |t: Regs| t.wf() && t.a == wl && src.eval(t.at(0)) == wr && t.keeps(st, 0)
+                    && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), st, r_jmp.len(), t);
+                assert(Builder::lands(r_jmp, data, r_jmp.len(), t, to as nat));
+                Builder::lemma_then(r_jmp, b.rev@, data, b.rev@.len(), st, r_jmp.len(), t, to as nat, 0);
+            }
+        }
+        Ok(())
+    }
+
     /// Emits a test of `l op r` that goes on to `pass` if it holds and to `fail` otherwise.
     ///
     /// ```text
-    ///     <operands' low words, bias>     ; both at most 32 bits
-    ///     j<op> src -> pass/fail
+    ///     <test of low words, bias>       ; both at most 32 bits
     ///
-    ///     <operands' high words, bias>    ; otherwise
-    ///     jgt src -> fail                 ; ordering
-    ///     jne src -> pass/fail            ; pass for ordering
+    ///     <test of high words> -> next/fail   ; equality, low words first if theirs always passes
+    /// next:
+    ///     <test of low words> -> pass/fail
+    ///
+    ///     <operands' high words, bias>    ; ordering
+    ///     jgt src -> fail
+    ///     jne src -> pass
     ///     <operands' low words>
     ///     j<op> src -> pass/fail
     /// ```
@@ -398,9 +474,7 @@ impl CmpOp {
         let t2 = rhs.ty(arch, sig);
         let bias: u32 = if (t1.exec_signed() || t2.exec_signed()) && op != CmpOp::Eq { 0x8000_0000 } else { 0 };
         if t1.exec_bits(arch) <= 32 && t2.exec_bits(arch) <= 32 {
-            op.emit_jump(b, rhs.src(arch, false, bias), yes, no)?;
-            let ghost r_jmp = b.rev@;
-            lhs.emit_operands(rhs, b, arch, sig, false, bias, 0)?;
+            op.emit_test(b, arch, Ghost(ctx), sig, lhs, rhs, false, bias, yes, no)?;
             proof {
                 assert forall |data: &[u8], st: Regs|
                     #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)]
@@ -411,21 +485,41 @@ impl CmpOp {
                     &&& !self.holds(l.value(arch, ctx, data), r.value(arch, ctx, data))
                         ==> Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)
                 } by {
-                    let src = rhs.src(arch, false, bias);
-                    let wl = lhs.word(arch, ctx, data, false) ^ bias;
-                    let wr = rhs.word(arch, ctx, data, false) ^ bias;
-                    let holds = op.holds(lhs.value(arch, ctx, data), rhs.value(arch, ctx, data));
-                    let to = if holds { yes } else { no };
                     op.lemma_narrow(lhs, rhs, arch, ctx, data, ty1, ty2);
-                    assert(Builder::loads2(b.rev@, data, b.rev@.len(), st, r_jmp.len(), wl, src, wr, 0));
-                    let t = choose |t: Regs| t.wf() && t.a == wl && src.eval(t.at(0)) == wr && t.keeps(st, 0)
-                        && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), st, r_jmp.len(), t);
-                    if holds {
-                        assert(Builder::lands(r_jmp, data, r_jmp.len(), t, yes as nat));
-                    } else {
-                        assert(Builder::lands(r_jmp, data, r_jmp.len(), t, no as nat));
+                }
+            }
+        } else if op == CmpOp::Eq {
+            // Equality holds word by word, so the words can go in either order, and the test
+            // that comes first emits nothing if it always passes.
+            let lo_first = matches!(lhs.masked_eq(rhs, arch, sig, false), Some(0));
+            op.emit_test(b, arch, Ghost(ctx), sig, lhs, rhs, lo_first, 0, yes, no)?;
+            let ghost r_last = b.rev@;
+            let next = b.label();
+            op.emit_test(b, arch, Ghost(ctx), sig, lhs, rhs, !lo_first, 0, next, no)?;
+            proof {
+                assert forall |data: &[u8], st: Regs|
+                    #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)]
+                    #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)]
+                    Event::parse(data) is Some && st.wf() implies {
+                    &&& self.holds(l.value(arch, ctx, data), r.value(arch, ctx, data))
+                        ==> Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)
+                    &&& !self.holds(l.value(arch, ctx, data), r.value(arch, ctx, data))
+                        ==> Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)
+                } by {
+                    let (hl, ll) = (lhs.word(arch, ctx, data, true), lhs.word(arch, ctx, data, false));
+                    let (hr, lr) = (rhs.word(arch, ctx, data, true), rhs.word(arch, ctx, data, false));
+                    op.lemma_pairs(lhs, rhs, arch, ctx, data, ty1, ty2);
+                    assert(hl ^ 0u32 == hl && hr ^ 0u32 == hr && ll ^ 0u32 == ll && lr ^ 0u32 == lr)
+                        by (bit_vector);
+                    let holds = hl == hr && ll == lr;
+                    let to = if holds { yes } else { no };
+                    if lhs.word(arch, ctx, data, !lo_first) == rhs.word(arch, ctx, data, !lo_first) {
+                        assert(Builder::lands(b.rev@, data, b.rev@.len(), st, next as nat));
+                        let m = choose |m: Regs| m.wf()
+                            && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), st, next as nat, m);
+                        assert(Builder::lands(r_last, data, next as nat, m, to as nat));
+                        Builder::lemma_then(r_last, b.rev@, data, b.rev@.len(), st, next as nat, m, to as nat, 0);
                     }
-                    Builder::lemma_then(r_jmp, b.rev@, data, b.rev@.len(), st, r_jmp.len(), t, to as nat, 0);
                 }
             }
         } else {
@@ -520,6 +614,113 @@ impl Expr {
             &&& self->BinOp_2.of_type(arch, ctx, b)
             &&& a.subtype_of(arch, b) && ty == b || b.subtype_of(arch, a) && ty == a
         }
+    }
+
+    /// Returns, if this is `x & m` for a literal `m` and `other` is a literal whose word is
+    /// zero, the bits `k` of `m` such that the two words are equal exactly when `x`'s word
+    /// has none of them set.
+    fn masked_eq(&self, other: &Expr, arch: Arch, sig: &[PrimType], hi: bool) -> (res: Option<u32>)
+        requires self.typed(arch, sig@), other.typed(arch, sig@)
+        ensures
+            res is Some ==> self is BinOp && self->BinOp_1.typed(arch, sig@),
+            res is Some ==> forall |data: &[u8]| #![trigger self.word(arch, sig@, data, hi)]
+                (self.word(arch, sig@, data, hi) == other.word(arch, sig@, data, hi))
+                    == (self->BinOp_1.word(arch, sig@, data, hi) & res->Some_0 == 0),
+    {
+        proof { self.lemma_operands_typed(arch, sig@); }
+        if let Expr::BinOp(BinOp::And, _, m) = self {
+            if let Src::K(k) = m.src(arch, hi, 0) {
+                let ty = self.ty(arch, sig);
+                if other.src(arch, hi, 0) == Src::K(0) && (!hi || ty.exec_bits(arch) == 64) {
+                    let mask = ty.exec_mask(arch);
+                    let k = k & if hi { (mask >> 32) as u32 } else { mask as u32 };
+                    proof {
+                        assert forall |data: &[u8]| #![trigger self.word(arch, sig@, data, hi)]
+                            (self.word(arch, sig@, data, hi) == other.word(arch, sig@, data, hi))
+                                == (self->BinOp_1.word(arch, sig@, data, hi) & k == 0) by {
+                            self.lemma_and_word(arch, sig@, data, ty, hi);
+                            let (wm, wo) = (m.word(arch, sig@, data, hi), other.word(arch, sig@, data, hi));
+                            assert(wm ^ 0u32 == wm && wo ^ 0u32 == wo) by (bit_vector);
+                        }
+                    }
+                    return Some(k);
+                }
+            }
+        }
+        None
+    }
+
+    /// Emits a test that goes on to `pass` if this expression's low or high word has no bit
+    /// of `k` set and to `fail` otherwise.
+    ///
+    /// ```text
+    ///                             ; k == 0 and pass next, emits nothing
+    ///
+    ///     <word>                  ; otherwise
+    ///     jset #k -> fail/pass
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    fn emit_jset(&self, b: &mut Builder, arch: Arch, Ghost(ctx): Ghost<Seq<PrimType>>, sig: &[PrimType],
+        hi: bool, k: u32, pass: Label, fail: Label) -> (res: Result<(), CompileError>)
+        requires
+            self.typed(arch, ctx),
+            sig@ == ctx,
+            0 < pass <= old(b).rev@.len(),
+            0 < fail <= old(b).rev@.len(),
+            pass == old(b).rev@.len() || fail == old(b).rev@.len(),
+            old(b).wf(),
+        ensures
+            Builder::extends(old(b).rev@, final(b).rev@),
+            final(b).wf(),
+            res is Ok ==> forall |data: &[u8], st: Regs| Event::parse(data) is Some && st.wf()
+                && self.word(arch, ctx, data, hi) & k == 0
+                ==> #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), st, pass as nat),
+            res is Ok ==> forall |data: &[u8], st: Regs| Event::parse(data) is Some && st.wf()
+                && self.word(arch, ctx, data, hi) & k != 0
+                ==> #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), st, fail as nat),
+    {
+        if k == 0 && pass == b.label() {
+            proof {
+                assert forall |data: &[u8], st: Regs| st.wf() implies
+                    #[trigger] Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat) by {
+                    assert(Builder::goes(b.rev@, data, b.rev@.len(), st, pass as nat, st));
+                }
+                assert forall |data: &[u8]| #![trigger self.word(arch, ctx, data, hi)]
+                    self.word(arch, ctx, data, hi) & k == 0 by {
+                    let w = self.word(arch, ctx, data, hi);
+                    assert(w & 0 == 0) by (bit_vector);
+                }
+            }
+            return Ok(());
+        }
+        if pass == b.label() {
+            b.emit_jump(JmpOp::Set, Src::K(k), true, fail)?;
+        } else {
+            b.emit_jump(JmpOp::Set, Src::K(k), false, pass)?;
+        }
+        let ghost r_jmp = b.rev@;
+        self.emit_word(b, arch, sig, hi, 0, 0)?;
+        proof {
+            assert forall |data: &[u8], st: Regs|
+                #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)]
+                #![trigger Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)]
+                Event::parse(data) is Some && st.wf() implies {
+                let clear = self.word(arch, ctx, data, hi) & k == 0;
+                &&& clear ==> Builder::lands(b.rev@, data, b.rev@.len(), st, pass as nat)
+                &&& !clear ==> Builder::lands(b.rev@, data, b.rev@.len(), st, fail as nat)
+            } by {
+                let w = self.word(arch, ctx, data, hi);
+                assert(w ^ 0u32 == w) by (bit_vector);
+                let to = if w & k == 0 { pass } else { fail };
+                assert(Builder::loads(b.rev@, data, b.rev@.len(), st, r_jmp.len(), w ^ 0, 0));
+                let t = choose |t: Regs| t.wf() && t.a == w ^ 0 && t.keeps(st, 0)
+                    && #[trigger] Builder::goes(b.rev@, data, b.rev@.len(), st, r_jmp.len(), t);
+                assert(t.test(JmpOp::Set, Src::K(k)) == (w & k != 0));
+                assert(Builder::goes(r_jmp, data, r_jmp.len(), t, to as nat, t));
+                Builder::lemma_then(r_jmp, b.rev@, data, b.rev@.len(), st, r_jmp.len(), t, to as nat, 0);
+            }
+        }
+        Ok(())
     }
 }
 

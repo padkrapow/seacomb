@@ -110,11 +110,12 @@ Part (a) is mostly contained in `src/spec/`, including the syntax and semantics 
 `seacomb`'s policy DSL, cBPF, and type signatures of all supported syscalls.
 These specs were written with assistance of AI agents, but heavily audited and understood manually.
 
-Part (b) notably includes the compiler implementation and its correctness proofs in
-`src/compiler.rs` and `src/compiler/`.
+Part (b) notably includes the compiler/optimizer implementation and its correctness proofs in
+`src/compiler/` and `src/opt/`.
 They are mostly generated using Claude Code and Codex,
 but their *correctness* against the specs in `src/spec/` is automatically verified by
-[Verus](https://github.com/verus-lang/verus).
+[Verus](https://github.com/verus-lang/verus), so one does not need to trust code
+in `src/compiler/` and `src/opt/`.
 
 There are some other components that are in a "gray area," which are verified for simpler
 properties like panic-freedom and termination, but they are not verified to be functionally correct
