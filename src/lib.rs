@@ -14,6 +14,7 @@ mod check;
 mod compiler;
 mod display;
 mod macros;
+mod opt;
 mod spec;
 mod syscall;
 pub mod prop;

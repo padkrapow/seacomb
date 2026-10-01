@@ -11,7 +11,7 @@ verus! {
 
 impl Expr {
     /// The 64-bit two's complement pattern of `v`.
-    pub(super) open spec fn pat(v: int) -> u64 {
+    pub(crate) open spec fn pat(v: int) -> u64 {
         (v % 0x1_0000_0000_0000_0000) as u64
     }
 
@@ -72,7 +72,7 @@ impl PrimType {
     }
 
     /// Reducing `v` to this type's bits agrees, within the mask, with its pattern.
-    pub(super) proof fn lemma_to_bits(self, arch: Arch, v: int)
+    pub(crate) proof fn lemma_to_bits(self, arch: Arch, v: int)
         ensures
             self.to_bits(arch, v) & self.mask(arch) == Expr::pat(v) & self.mask(arch),
             self.to_int(arch, self.to_bits(arch, v)) == self.to_int(arch, Expr::pat(v)),
@@ -130,7 +130,7 @@ impl PrimType {
     }
 
     /// Returns the pattern of the literal `c` converted to this type.
-    fn lit_pattern(self, arch: Arch, c: i64) -> (res: u64)
+    pub(crate) fn lit_pattern(self, arch: Arch, c: i64) -> (res: u64)
         ensures res == Expr::pat(self.trunc(arch, c as int))
     {
         // The 64-bit two's complement word of `c`.
@@ -363,7 +363,7 @@ impl Arch {
 
 impl Expr {
     /// Whether this expression has a type.
-    pub(super) open spec fn typed(&self, arch: Arch, ctx: Seq<PrimType>) -> bool {
+    pub(crate) open spec fn typed(&self, arch: Arch, ctx: Seq<PrimType>) -> bool {
         exists |t: PrimType| self.of_type(arch, ctx, t)
     }
 
@@ -388,7 +388,7 @@ impl Expr {
     }
 
     /// The operands of a typed expression are typed.
-    pub(super) proof fn lemma_operands_typed(&self, arch: Arch, ctx: Seq<PrimType>)
+    pub(crate) proof fn lemma_operands_typed(&self, arch: Arch, ctx: Seq<PrimType>)
         requires self.typed(arch, ctx)
         ensures
             self matches Expr::Cast(e, _) ==> e.typed(arch, ctx),

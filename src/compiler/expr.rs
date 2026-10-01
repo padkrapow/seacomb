@@ -487,7 +487,7 @@ impl Expr {
     }
 
     /// The types an expression can have agree on width and signedness.
-    pub(super) proof fn lemma_type_unique(&self, arch: Arch, ctx: Seq<PrimType>, t1: PrimType, t2: PrimType)
+    pub(crate) proof fn lemma_type_unique(&self, arch: Arch, ctx: Seq<PrimType>, t1: PrimType, t2: PrimType)
         requires self.of_type(arch, ctx, t1), self.of_type(arch, ctx, t2)
         ensures t1.bits(arch) == t2.bits(arch), t1.signed() == t2.signed()
         decreases self
@@ -508,7 +508,7 @@ impl Expr {
     }
 
     /// Returns the types of the operands of a sum or difference of type `ty`.
-    pub(super) proof fn lemma_operands(&self, arch: Arch, ctx: Seq<PrimType>, ty: PrimType) -> (tys: (PrimType, PrimType))
+    pub(crate) proof fn lemma_operands(&self, arch: Arch, ctx: Seq<PrimType>, ty: PrimType) -> (tys: (PrimType, PrimType))
         requires self is BinOp, self->BinOp_0 is Add || self->BinOp_0 is Sub, self.of_type(arch, ctx, ty)
         ensures
             self->BinOp_1.of_type(arch, ctx, tys.0),

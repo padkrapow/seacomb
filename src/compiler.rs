@@ -35,7 +35,7 @@ pub enum CompileError {
 }
 
 impl<S: Syscall> Policy<S> {
-    /// Compiles the policy into a filter program.
+    /// Compiles the optimized policy into a filter program.
     pub(crate) fn to_cbpf(&self) -> (res: Result<Program, CompileError>)
         requires self.wf()
         ensures res matches Ok(prog) ==> {
@@ -49,44 +49,45 @@ impl<S: Syscall> Policy<S> {
                 }
         }
     {
+        let policy = self.optimize();
         let mut b = Builder::new();
 
         // The filter's last resort: the event came from an architecture that the
         // policy leaves out of scope.
         //
         //      ret #act_bad_arch
-        b.emit(Instr::Ret(RetVal::K(self.act_bad_arch.exec_to_ret())));
+        b.emit(Instr::Ret(RetVal::K(policy.act_bad_arch.exec_to_ret())));
 
-        proof { Builder::lemma_ret(b.rev@, self.act_bad_arch.to_ret()); }
+        proof { Builder::lemma_ret(b.rev@, policy.act_bad_arch.to_ret()); }
 
         // One block per architecture token, tried in turn:
         //
         //      <block of the first architecture>
         //      <block of the second architecture>
         //      ...
-        let mut i = self.archs.len();
+        let mut i = policy.archs.len();
         while i > 0
             invariant
-                i <= self.archs@.len(),
-                self.wf(),
+                i <= policy.archs@.len(),
+                policy.wf(),
                 b.wf(),
                 0 < b.rev@.len(),
                 b.rev@[0] is Ret,
                 forall |data: &[u8]| Event::parse(data) is Some ==>
                     #[trigger] Builder::returns_all(b.rev@, data, b.rev@.len(),
-                        self.blocks(Event::of(data), i as int).to_ret()),
+                        policy.blocks(Event::of(data), i as int).to_ret()),
             decreases i
         {
             i -= 1;
             let ghost prev = b.rev@;
             let ghost i0 = i as int + 1;
-            self.emit_arch_block(&mut b, self.archs[i])?;
+            policy.emit_arch_block(&mut b, policy.archs[i])?;
             proof {
                 assert forall |data: &[u8]| Event::parse(data) is Some implies
                     #[trigger] Builder::returns_all(b.rev@, data, b.rev@.len(),
-                        self.blocks(Event::of(data), i as int).to_ret()) by {
+                        policy.blocks(Event::of(data), i as int).to_ret()) by {
                     assert(Builder::returns_all(prev, data, prev.len(),
-                        self.blocks(Event::of(data), i0).to_ret()));
+                        policy.blocks(Event::of(data), i0).to_ret()));
                 }
             }
         }
@@ -100,7 +101,7 @@ impl<S: Syscall> Policy<S> {
                     &&& #[trigger] self.eval(Event::of(data), act)
                     &&& prog.eval(data) == Outcome::Return(act.to_ret())
                 } by {
-                let act = self.blocks(Event::of(data), 0);
+                let act = policy.blocks(Event::of(data), 0);
                 prog.lemma_run(data);
                 assert(prog.instrs@.len() == gb.rev@.len());
                 assert(Builder::returns_all(gb.rev@, data, gb.rev@.len(), act.to_ret()));
@@ -109,7 +110,8 @@ impl<S: Syscall> Policy<S> {
                     act.to_ret()));
                 assert(Builder::run(gb.rev@, data, gb.rev@.len(), Regs::of(MachineState::init()))
                     == Outcome::Return(act.to_ret()));
-                self.lemma_blocks(Event::of(data), 0);
+                policy.lemma_blocks(Event::of(data), 0);
+                assert(policy.eval(Event::of(data), act));
                 assert(prog.eval(data) == Outcome::Return(act.to_ret()));
             }
         }

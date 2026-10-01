@@ -114,7 +114,7 @@ impl Arch {
 
 impl<S: Syscall> Rule<S> {
     /// Executable version of [`Rule::active_on`].
-    fn is_active_on(&self, arch: Arch) -> (res: bool)
+    pub(crate) fn is_active_on(&self, arch: Arch) -> (res: bool)
         ensures res == self.active_on(arch)
     {
         if self.archs.is_empty() {

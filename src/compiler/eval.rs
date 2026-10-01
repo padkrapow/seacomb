@@ -17,7 +17,7 @@ impl Arch {
 
 impl<S: Syscall> Rule<S> {
     /// Whether the rule is evaluated on `arch`, given that the policy includes `arch`.
-    pub(super) open spec fn active_on(self, arch: Arch) -> bool {
+    pub(crate) open spec fn active_on(self, arch: Arch) -> bool {
         self.archs@.len() == 0 || self.archs@.contains(arch)
     }
 
