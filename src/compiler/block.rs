@@ -239,7 +239,7 @@ impl<S: Syscall> Policy<S> {
                     self.dispatch(arch, Event::of(data), 7, self.rules@.len() as int).to_ret()),
     {
         b.emit(Instr::Ret(RetVal::K(self.act_no_match.exec_to_ret())));
-        proof { Builder::lemma_ret(b.rev@, self.act_no_match.to_ret()); }
+        proof { Builder::lemma_ret(b.rev@, b.rev@.len(), self.act_no_match.to_ret()); }
         // The builder runs backward: low precedence and early rules are emitted first.
         let mut priority: u8 = 0;
         proof {

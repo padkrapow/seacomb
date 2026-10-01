@@ -32,6 +32,28 @@ impl Builder {
         self.rev.len()
     }
 
+    /// Returns the label of a `ret #k` that a one-byte jump offset reaches from here, if any.
+    pub(super) fn find_ret(&self, k: u32) -> (res: Option<Label>)
+        ensures res matches Some(l) ==> {
+            &&& 0 < l <= self.rev@.len()
+            &&& forall |data: &[u8]| #[trigger] Builder::returns_all(self.rev@, data, l as nat, k)
+        }
+    {
+        let len = self.rev.len();
+        let mut l = len;
+        while l > 0 && len - l <= u8::MAX as usize
+            invariant l <= len == self.rev@.len()
+            decreases l
+        {
+            if self.rev[l - 1] == Instr::Ret(RetVal::K(k)) {
+                proof { Builder::lemma_ret(self.rev@, l as nat, k); }
+                return Some(l);
+            }
+            l -= 1;
+        }
+        None
+    }
+
     /// Puts one instruction in front of the program.
     pub(super) fn emit(&mut self, instr: Instr)
         ensures

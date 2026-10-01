@@ -14,8 +14,11 @@ All notable changes to this crate are documented here. The format follows
 - A rule may now list architectures its policy does not enable, in which case
   it's not compiled for that architecture but still type-checked.
 - New policy optimizer that merges similar rules and simplifies conditions.
-  This reduces the number of cBPF instructions in `examples` by 19.4% in average
+  This reduces the number of cBPF instructions in `examples/` by 19.4% in average
   on aarch64.
+- Rules now share one `ret` per action, and a rule without a condition compiles
+  to a single jump. This further reduces the number of cBPF instructions in
+  `examples/` by 38.0% in average on aarch64.
 
 ### Removed
 

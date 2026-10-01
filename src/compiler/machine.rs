@@ -317,15 +317,15 @@ impl Builder {
         }
     }
 
-    /// The return at the front of `rev` ends the filter with `k`.
-    pub(super) proof fn lemma_ret(rev: Seq<Instr>, k: u32)
-        requires 0 < rev.len(), rev[rev.len() - 1] == Instr::Ret(RetVal::K(k))
-        ensures forall |data: &[u8]| #[trigger] Self::returns_all(rev, data, rev.len(), k)
+    /// The return at `label` ends the filter with `k`.
+    pub(super) proof fn lemma_ret(rev: Seq<Instr>, label: nat, k: u32)
+        requires 0 < label <= rev.len(), rev[label - 1] == Instr::Ret(RetVal::K(k))
+        ensures forall |data: &[u8]| #[trigger] Self::returns_all(rev, data, label, k)
     {
-        assert forall |data: &[u8], r: Regs| #[trigger] Self::returns(rev, data, rev.len(), r, k) by {
+        assert forall |data: &[u8], r: Regs| #[trigger] Self::returns(rev, data, label, r, k) by {
             assert forall |ext: Seq<Instr>| Self::extends(rev, ext)
-                implies #[trigger] Self::run(ext, data, rev.len(), r) == Outcome::Return(k) by {
-                Self::lemma_front(rev, data, r);
+                implies #[trigger] Self::run(ext, data, label, r) == Outcome::Return(k) by {
+                assert(ext[label - 1] == rev[label - 1]);
             }
         }
     }

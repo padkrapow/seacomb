@@ -58,7 +58,7 @@ impl<S: Syscall> Policy<S> {
         //      ret #act_bad_arch
         b.emit(Instr::Ret(RetVal::K(policy.act_bad_arch.exec_to_ret())));
 
-        proof { Builder::lemma_ret(b.rev@, policy.act_bad_arch.to_ret()); }
+        proof { Builder::lemma_ret(b.rev@, b.rev@.len(), policy.act_bad_arch.to_ret()); }
 
         // One block per architecture token, tried in turn:
         //

@@ -233,6 +233,8 @@ impl<S: Syscall> Rule<S> {
     ///     <body>
     ///     ld  [nr]            ; hands A back to the test behind this one
     /// end:
+    ///
+    ///     <unconditional test> ; cond is true
     /// ```
     fn emit(&self, b: &mut Builder, arch: Arch, nr: u32, cond: &Cond, sig: &[PrimType])
         -> (res: Result<(), CompileError>)
@@ -251,6 +253,9 @@ impl<S: Syscall> Rule<S> {
                 #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r,
                     old(b).rev@.len(), Event::of(data).nr as u32),
     {
+        if matches!(cond, Cond::True) {
+            return self.emit_unconditional(b, nr);
+        }
         let end = b.label();
         b.emit(Instr::LdAbs(Event::OFFSET_NR));
         proof { Builder::lemma_ld(b.rev@, Event::OFFSET_NR); }
@@ -293,14 +298,74 @@ impl<S: Syscall> Rule<S> {
         Ok(())
     }
 
-    /// Emits the test of `cond` over signature `sig`, then this rule's action.
+    /// Emits the test that reaches this rule at syscall number `nr`, for a rule without a condition.
+    ///
+    /// Forward layout, entered with `A` holding `seccomp_data.nr`:
+    ///
+    /// ```text
+    ///     jeq #nr -> ret      ; an earlier ret #action is in reach
+    ///
+    ///     jne #nr -> end      ; otherwise
+    ///     ret #action
+    /// end:
+    /// ```
+    fn emit_unconditional(&self, b: &mut Builder, nr: u32) -> (res: Result<(), CompileError>)
+        requires 0 < b.rev@.len(), b.wf()
+        ensures
+            Builder::extends(old(b).rev@, final(b).rev@),
+            final(b).wf(),
+            res is Ok ==> forall |data: &[u8], r: Regs| r.wf() && r.a == nr ==>
+                #[trigger] Builder::returns(final(b).rev@, data, final(b).rev@.len(), r, self.action.to_ret()),
+            res is Ok ==> forall |data: &[u8], r: Regs| r.wf() && r.a != nr ==>
+                #[trigger] Builder::passes(final(b).rev@, data, final(b).rev@.len(), r, old(b).rev@.len(), r.a),
+    {
+        let end = b.label();
+        let k = self.action.exec_to_ret();
+        let ghost prev = b.rev@;
+        match b.find_ret(k) {
+            Some(ret) => {
+                b.emit_jump(JmpOp::Eq, Src::K(nr), true, ret)?;
+                proof {
+                    assert forall |data: &[u8], r: Regs| r.wf() && r.a == nr implies
+                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, k) by {
+                        assert(Builder::goes(b.rev@, data, b.rev@.len(), r, ret as nat, r));
+                        assert(Builder::returns_all(prev, data, ret as nat, k));
+                        Builder::lemma_then(prev, b.rev@, data, b.rev@.len(), r, ret as nat, r, 0, k);
+                    }
+                }
+            }
+            None => {
+                b.emit(Instr::Ret(RetVal::K(k)));
+                let ghost r_ret = b.rev@;
+                proof { Builder::lemma_ret(r_ret, r_ret.len(), k); }
+                b.emit_jump(JmpOp::Eq, Src::K(nr), false, end)?;
+                proof {
+                    assert forall |data: &[u8], r: Regs| r.wf() && r.a == nr implies
+                        #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, k) by {
+                        assert(Builder::goes(b.rev@, data, b.rev@.len(), r, r_ret.len(), r));
+                        assert(Builder::returns_all(r_ret, data, r_ret.len(), k));
+                        Builder::lemma_then(r_ret, b.rev@, data, b.rev@.len(), r, r_ret.len(), r, 0, k);
+                    }
+                }
+            }
+        }
+        proof {
+            assert forall |data: &[u8], r: Regs| r.wf() && r.a != nr implies
+                #[trigger] Builder::passes(b.rev@, data, b.rev@.len(), r, end as nat, r.a) by {
+                assert(Builder::goes(b.rev@, data, b.rev@.len(), r, end as nat, r));
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits the test of `cond` over signature `sig`, which goes on to a `ret #action` if it holds.
     ///
     /// Forward layout, with `end` just past the body:
     ///
     /// ```text
     ///     ja  <test>          ; the test starts elsewhere
     ///     <test of the condition> -> ret/end
-    ///     ret #action
+    ///     ret #action         ; unless an earlier one is in reach
     /// end:
     /// ```
     fn emit_body(&self, b: &mut Builder, arch: Arch, cond: &Cond, sig: &[PrimType])
@@ -320,17 +385,23 @@ impl<S: Syscall> Rule<S> {
                 #[trigger] Builder::lands(final(b).rev@, data, final(b).rev@.len(), r, old(b).rev@.len()),
     {
         let end = b.label();
-        b.emit(Instr::Ret(RetVal::K(self.action.exec_to_ret())));
+        let k = self.action.exec_to_ret();
+        let ret = match b.find_ret(k) {
+            Some(ret) => ret,
+            None => {
+                b.emit(Instr::Ret(RetVal::K(k)));
+                proof { Builder::lemma_ret(b.rev@, b.rev@.len(), k); }
+                b.label()
+            }
+        };
         let ghost r_ret = b.rev@;
         proof {
-            Builder::lemma_ret(r_ret, self.action.to_ret());
             assert forall |data: &[u8], r: Regs| r.wf() implies #[trigger] Builder::returns(r_ret, data,
-                r_ret.len(), r, self.action.to_ret()) by {
-                assert(Builder::returns_all(r_ret, data, r_ret.len(), self.action.to_ret()));
+                ret as nat, r, k) by {
+                assert(Builder::returns_all(r_ret, data, ret as nat, k));
             }
         }
 
-        let ret = b.label();
         let entry = cond.emit(b, arch, Ghost(sig@), sig, ret, end)?;
         let ghost r_cond = b.rev@;
         if entry != b.label() {
@@ -345,15 +416,13 @@ impl<S: Syscall> Rule<S> {
             }
             assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
                 && cond.holds(arch, sig@, data)
-                implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, self.action.to_ret()) by {
+                implies #[trigger] Builder::returns(b.rev@, data, b.rev@.len(), r, k) by {
                 assert(Builder::lands(r_cond, data, entry as nat, r, ret as nat));
                 let m = choose |m: Regs| m.wf()
                     && #[trigger] Builder::goes(r_cond, data, entry as nat, r, ret as nat, m);
-                Builder::lemma_then(r_ret, r_cond, data, entry as nat, r, ret as nat, m, 0,
-                    self.action.to_ret());
+                Builder::lemma_then(r_ret, r_cond, data, entry as nat, r, ret as nat, m, 0, k);
                 assert(Builder::goes(b.rev@, data, b.rev@.len(), r, entry as nat, r));
-                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), r, entry as nat, r, 0,
-                    self.action.to_ret());
+                Builder::lemma_then(r_cond, b.rev@, data, b.rev@.len(), r, entry as nat, r, 0, k);
             }
             assert forall |data: &[u8], r: Regs| Event::parse(data) is Some && r.wf()
                 && !cond.holds(arch, sig@, data)
